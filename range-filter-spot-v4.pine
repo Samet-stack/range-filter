@@ -50,7 +50,7 @@ atrLen = input.int(14, "Periode ATR", minval = 2, maxval = 200, group = G_CORE)
 atrFloor = input.float(0.25, "Largeur minimale / ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = G_CORE)
 rangeBars = input.int(20, "Bougies plates = plat prolonge", minval = 1, maxval = 500, group = G_CORE)
 
-useCostGate = input.bool(true, "Largeur du filtre suffisante face aux couts", group = G_ENTRY, tooltip = "Refuse un achat si largeur / prix < k x cout aller-retour. La largeur est l'echelle de bruit du filtre : un aller-retour perdant coute environ 2 largeurs. Ce n'est pas une prevision de gain.")
+useCostGate = input.bool(false, "Largeur du filtre suffisante face aux couts", group = G_ENTRY, tooltip = "Refuse un achat si largeur / prix < k x cout aller-retour. Desactive par defaut : audit du 2026-10-20, aucun gain sur 15 min a 4 h, et la largeur lente bloque les departs apres une phase calme. Ce n'est pas une prevision de gain.")
 costGateMult = input.float(3.0, "k : largeur minimale / cout aller-retour", minval = 0.5, step = 0.5, group = G_ENTRY)
 useEr = input.bool(false, "ER minimal a l'entree", group = G_ENTRY, tooltip = "ER = deplacement net / somme des mouvements. Hypothese a tester, desactivee par defaut. Une marche au hasard donne deja un ER(20) d'environ 0,2.")
 erLen = input.int(20, "Periode ER", minval = 2, maxval = 500, group = G_ENTRY)
