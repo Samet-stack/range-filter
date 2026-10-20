@@ -1,0 +1,475 @@
+// Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International.
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// Original: Range Filter Trend [QuantAlgo], © QuantAlgo.
+// Adaptation for Samet, 2026-10-03: guarded range, regime detection,
+// reversal confirmation, optional adaptation/HTF, confirmed-bar outputs.
+// V2 refinement: ER gates fresh confirmations without forcing an immediate
+// neutral exit from an established trend; blocked confirmation evidence resets.
+// Continuing filter steps require a new source extreme since the last step.
+// V2.1: the first opposite filter step invalidates the accepted trend
+// before ER/HTF/confirmation gates; neutral until a new trend confirms.
+// V3: display the observed filter direction independently of entries.
+// V3.1: reactive entries on the first accepted filter step at bar close.
+// Spot V4, 2026-10-20: strategy() for long-only spot evaluation. Explicit
+// FLAT/LONG states, a V3.1 control version, cost-aware entry gate, frozen
+// protective stop, optional ratcheting trail, explicit exit reasons.
+// Positions are simulated: this script reads no exchange account and places no order.
+// This derivative retains the original attribution and license. No affiliation implied.
+//@version=6
+strategy("Range Filter Spot V4", overlay = true, max_bars_back = 5000, initial_capital = 10000, currency = currency.NONE, pyramiding = 0, commission_type = strategy.commission.percent, commission_value = 0.10, slippage = 0, process_orders_on_close = false, calc_on_every_tick = false, margin_long = 100, margin_short = 100, max_labels_count = 500)
+
+const string G_MODE = "1. Version"
+const string G_CORE = "2. Filtre"
+const string G_ENTRY = "3. Filtres d'entree (Ameliore)"
+const string G_EXIT = "4. Sorties (Ameliore)"
+const string G_SIZE = "5. Montant"
+const string G_COST = "6. Couts supposes"
+const string G_TEST = "7. Fenetre de test"
+const string G_VIS = "8. Affichage"
+
+const string VERSION_CONTROL = "Temoin V3.1 spot"
+const string VERSION_IMPROVED = "Ameliore"
+const string FLAT_EXIT = "Sortir"
+const string FLAT_IF_NO_GAIN = "Sortir si pas de gain net"
+const string FLAT_KEEP = "Conserver"
+const string FX_AUTO = "Auto EURUSD (veille)"
+const string FX_MANUAL = "Manuel"
+const string ENTRY_ID = "Achat"
+const string EXIT_ID = "Protection"
+const string EXIT_INVALID = "INVALIDATION"
+const string EXIT_STAGNATION = "STAGNATION"
+const string EXIT_END = "FIN FENETRE"
+const string EXIT_STOP = "STOP"
+const string EXIT_TRAIL = "SUIVEUSE"
+
+versionMode = input.string(VERSION_IMPROVED, "Version", options = [VERSION_CONTROL, VERSION_IMPROVED], group = G_MODE, tooltip = "Temoin : V3.1 Reactif sans HTF, traduit en spot. ACHAT au premier pas haussier si a plat; VENTE au premier pas baissier ou apres un plat prolonge. Aucun stop, aucun filtre d'entree. Memes couts et meme montant que la version Amelioree, pour une comparaison equitable.")
+
+periodIn = input.int(100, "Periode", minval = 2, maxval = 1000, group = G_CORE)
+multIn = input.float(3.0, "Multiplicateur", minval = 0.5, step = 0.25, group = G_CORE, tooltip = "Un achat exige environ 2 largeurs de hausse depuis la plus basse cloture; une invalidation, environ 2 largeurs de baisse depuis la plus haute. Plus petit = moins de retard, plus d'allers-retours.")
+atrLen = input.int(14, "Periode ATR", minval = 2, maxval = 200, group = G_CORE)
+atrFloor = input.float(0.25, "Largeur minimale / ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = G_CORE)
+rangeBars = input.int(20, "Bougies plates = plat prolonge", minval = 1, maxval = 500, group = G_CORE)
+
+useCostGate = input.bool(true, "Largeur du filtre suffisante face aux couts", group = G_ENTRY, tooltip = "Refuse un achat si largeur / prix < k x cout aller-retour. La largeur est l'echelle de bruit du filtre : un aller-retour perdant coute environ 2 largeurs. Ce n'est pas une prevision de gain.")
+costGateMult = input.float(3.0, "k : largeur minimale / cout aller-retour", minval = 0.5, step = 0.5, group = G_ENTRY)
+useEr = input.bool(false, "ER minimal a l'entree", group = G_ENTRY, tooltip = "ER = deplacement net / somme des mouvements. Hypothese a tester, desactivee par defaut. Une marche au hasard donne deja un ER(20) d'environ 0,2.")
+erLen = input.int(20, "Periode ER", minval = 2, maxval = 500, group = G_ENTRY)
+erMin = input.float(0.30, "ER minimal", minval = 0.0, maxval = 1.0, step = 0.01, group = G_ENTRY)
+useExt = input.bool(false, "Refuser une entree trop etendue", group = G_ENTRY, tooltip = "Depassement = (cloture - filtre precedent) / largeur. Vaut au moins 1 a l'achat. 2 = la cloture a saute une largeur entiere au-dela de la bande sur une seule bougie.")
+extMax = input.float(2.0, "Depassement maximal", minval = 1.0, step = 0.25, group = G_ENTRY)
+useHtf = input.bool(false, "Filtre HTF (bougies terminees)", group = G_ENTRY, tooltip = "Achat seulement si la derniere cloture HTF terminee est au-dessus de son EMA. N'empeche jamais une vente.")
+htfInput = input.timeframe("240", "Unite superieure", group = G_ENTRY)
+htfLen = input.int(200, "Periode EMA HTF", minval = 2, maxval = 1000, group = G_ENTRY)
+cooldownBars = input.int(0, "Pause apres une sortie (bougies)", minval = 0, maxval = 200, group = G_ENTRY, tooltip = "0 : seul un rachat sur la bougie meme d'un stop est interdit. N > 0 : aucun achat pendant N bougies apres une sortie.")
+
+useStop = input.bool(true, "Stop de protection", group = G_EXIT, tooltip = "Fige a l'entree : seuil d'invalidation (filtre - largeur) moins un tampon. Simule dans la bougie. Ne remplace pas un ordre declencheur reel sur l'exchange.")
+stopBufferAtr = input.float(0.25, "Tampon sous l'invalidation / ATR", minval = 0.0, step = 0.05, group = G_EXIT)
+useTrail = input.bool(false, "Sortie suiveuse", group = G_EXIT, tooltip = "Active quand le plus haut depuis l'entree depasse entree + D. Niveau = plus haut - D, D = distance x ATR fige a l'entree. Le stop ne fait que monter.")
+trailAtr = input.float(2.0, "Distance suiveuse D / ATR d'entree", minval = 0.5, step = 0.25, group = G_EXIT)
+flatRule = input.string(FLAT_IF_NO_GAIN, "Plat prolonge en position", options = [FLAT_IF_NO_GAIN, FLAT_EXIT, FLAT_KEEP], group = G_EXIT, tooltip = "Un filtre plat n'est pas une inversion. Par defaut : sortie seulement si la cloture ne couvre pas le prix d'entree + couts aller-retour (stagnation). Le Temoin sort toujours, comme V3.1.")
+
+budgetEur = input.float(600.0, "Budget par trade (EUR)", minval = 0.0, group = G_SIZE)
+fxMode = input.string(FX_AUTO, "Conversion EUR -> devise de cotation", options = [FX_AUTO, FX_MANUAL], group = G_SIZE, tooltip = "Auto : cloture EURUSD de la veille (FX_IDC), en supposant USDC = USD. Frais de conversion et de depot exclus : ce ne sont pas des couts par trade.")
+fxManual = input.float(1.10, "Taux manuel : 1 EUR = x cotation", minval = 0.01, step = 0.01, group = G_SIZE, tooltip = "Valeur d'exemple, a remplacer par ton taux reel.")
+availQuote = input.float(0.0, "Disponible reel en cotation (0 = sans plafond)", minval = 0.0, group = G_SIZE, tooltip = "Saisi a la main. Le script ne lit pas ton portefeuille Hyperliquid.")
+maxRiskEur = input.float(0.0, "Perte maximale au stop (EUR, 0 = off)", minval = 0.0, group = G_SIZE, tooltip = "Si actif, la quantite est reduite pour que (entree - stop + couts) x quantite reste sous ce montant. Le budget reste un plafond. Un gap peut depasser cette perte.")
+szDecIn = input.int(-1, "Decimales de quantite (-1 = auto)", minval = -1, maxval = 8, group = G_SIZE, tooltip = "Hyperliquid spot, API spotMeta du 2026-10-20 : UBTC 5, UETH 4, HYPE 2, UZEC 4.")
+minNotional = input.float(10.0, "Ordre minimal (cotation)", minval = 0.0, group = G_SIZE, tooltip = "10 USDC selon une source secondaire, non trouve dans la doc officielle consultee le 2026-10-20.")
+
+feePct = input.float(0.070, "Frais taker par cote (%)", minval = 0.0, step = 0.005, group = G_COST, tooltip = "Hyperliquid spot, palier de base, doc consultee le 2026-10-20. Sans remise de staking, parrainage ou volume.")
+spreadSlipPct = input.float(0.030, "Demi-spread + glissement par cote (%)", minval = 0.0, step = 0.01, group = G_COST, tooltip = "Reference 0,03 %. Scenario defavorable : 0,20 %. Regler Proprietes > Commission = frais + cette valeur, et Glissement = 0, pour ne rien compter deux fois.")
+
+startTime = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Debut", group = G_TEST)
+endTime = input.time(timestamp("31 Dec 2099 00:00 +0000"), "Fin", group = G_TEST, tooltip = "Entrees seulement dans la fenetre. Une position encore ouverte est vendue a la premiere cloture apres la fin.")
+
+colUp = input.color(#00c896, "Hausse", group = G_VIS)
+colDown = input.color(#ff3b3b, "Baisse", group = G_VIS)
+colFlat = input.color(#808080, "Plat", group = G_VIS)
+lineWidth = input.int(2, "Epaisseur", minval = 1, maxval = 8, group = G_VIS)
+showBands = input.bool(false, "Afficher bande haute et seuil d'invalidation", group = G_VIS, tooltip = "Le seuil d'invalidation est masque pendant une position : le stop et la zone de risque le remplacent.")
+showBlocked = input.bool(true, "Afficher les achats refuses (point gris)", group = G_VIS, tooltip = "Survoler le point pour lire le motif du refus.")
+showLabels = input.bool(true, "Etiquettes ACHAT / VENTE / STOP", group = G_VIS, tooltip = "Survoler une etiquette pour le detail : prix, quantite, stop, resultat.")
+showLive = input.bool(true, "Tableau : situation en cours", group = G_VIS)
+showResults = input.bool(true, "Tableau : resultats du test", group = G_VIS)
+
+// === SETUP ===
+bool control = versionMode == VERSION_CONTROL
+bool costGateOn = not control and useCostGate
+bool erGateOn = not control and useEr
+bool extGateOn = not control and useExt
+bool htfEnabled = not control and useHtf
+bool stopOn = not control and useStop
+bool trailOn = not control and useTrail
+int cooldownEff = control ? 0 : cooldownBars
+string flatRuleEff = control ? FLAT_EXIT : flatRule
+float sideCostPct = feePct + spreadSlipPct
+float roundTrip = 2.0 * sideCostPct / 100.0
+
+if barstate.isfirst
+    if not chart.is_standard
+        runtime.error("Utiliser des bougies standard : Heikin Ashi, Renko, etc. faussent les prix d'execution.")
+    if htfEnabled and timeframe.in_seconds(htfInput) <= timeframe.in_seconds()
+        runtime.error("Choisir une unite HTF strictement superieure a celle du graphique.")
+    if endTime <= startTime
+        runtime.error("La fin de la fenetre de test doit suivre son debut.")
+
+// === ENGINE ===
+float rawRange = math.abs(close - close[1])
+float firstPass = ta.ema(rawRange, periodIn)
+float secondPass = ta.ema(math.max(firstPass, 0.0), periodIn * 2 - 1)
+float atrValue = ta.atr(atrLen)
+float travel = math.sum(rawRange, erLen)
+float netMove = math.abs(close - close[erLen])
+float erRaw = na(travel) or na(netMove) ? na : travel > 0.0 ? math.min(1.0, netMove / travel) : 0.0
+float efficiency = ta.ema(erRaw, 3)
+float minimumRange = math.max(syminfo.mintick, nz(atrValue) * atrFloor)
+float rangeWidth = na(secondPass) ? na : math.max(secondPass * multIn, minimumRange)
+int warmupBars = math.max(periodIn * 3, math.max(erLen + 3, atrLen))
+bool ready = not na(close[1]) and not na(rangeWidth) and not na(atrValue) and not na(efficiency) and bar_index >= warmupBars
+
+// [1] + lookahead_on returns only the previous, completed HTF candle.
+[htfClose, htfAverage] = request.security(syminfo.tickerid, htfEnabled ? htfInput : timeframe.period, [close[1], ta.ema(close, htfLen)[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+bool htfLong = not htfEnabled or (not na(htfAverage) and htfClose > htfAverage)
+
+var float filt = na
+var float rangeOnClose = na
+var float erOnClose = na
+var bool readyOnClose = false
+var int filterDirection = 0
+var int flatBars = 0
+var int lastStepDirection = 0
+var float lastStepSource = na
+int stepDirection = 0
+float prevFiltBar = na
+
+// The filter and every decision below change only at bar close.
+if barstate.isconfirmed
+    rangeOnClose := rangeWidth
+    erOnClose := efficiency
+    readyOnClose := ready
+    if not ready
+        filt := na
+        filterDirection := 0
+        flatBars := 0
+        lastStepDirection := 0
+        lastStepSource := na
+    else
+        float prevFilt = nz(filt, close)
+        prevFiltBar := prevFilt
+        float candidate = close > prevFilt ? math.max(prevFilt, close - rangeWidth) : math.min(prevFilt, close + rangeWidth)
+        // A shrinking range alone must not advance the filter.
+        bool priceSupportsStep = candidate > prevFilt ? close > close[1] : candidate < prevFilt ? close < close[1] : true
+        filt := priceSupportsStep ? candidate : prevFilt
+        stepDirection := filt > prevFilt ? 1 : filt < prevFilt ? -1 : 0
+        // A continuation needs actual price progress since the last step.
+        if stepDirection != 0 and stepDirection == lastStepDirection
+            bool newExtreme = stepDirection == 1 ? close > lastStepSource : close < lastStepSource
+            if not newExtreme
+                filt := prevFilt
+                stepDirection := 0
+        if stepDirection != 0
+            lastStepDirection := stepDirection
+            lastStepSource := close
+        flatBars := stepDirection == 0 ? flatBars + 1 : 0
+        if stepDirection != 0
+            filterDirection := stepDirection
+        else if flatBars >= rangeBars
+            filterDirection := 0
+
+// === SIZING ===
+float fxDaily = request.security("FX_IDC:EURUSD", "D", close[1], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+bool quoteIsEur = syminfo.currency == "EUR"
+bool quoteIsUsdLike = syminfo.currency == "USD" or syminfo.currency == "USDC" or syminfo.currency == "USDT"
+bool fxIsAuto = not quoteIsEur and fxMode == FX_AUTO and quoteIsUsdLike and not na(fxDaily)
+float fxRate = quoteIsEur ? 1.0 : fxIsAuto ? fxDaily : fxManual
+string baseCcy = syminfo.basecurrency
+bool decKnown = str.contains(baseCcy, "BTC") or str.contains(baseCcy, "ETH") or str.contains(baseCcy, "HYPE") or str.contains(baseCcy, "ZEC")
+int autoDec = str.contains(baseCcy, "BTC") ? 5 : str.contains(baseCcy, "HYPE") ? 2 : 4
+int qtyDec = szDecIn >= 0 ? szDecIn : autoDec
+float qtyStep = math.pow(10.0, -qtyDec)
+float budgetQuote = budgetEur * fxRate
+float notionalCap = availQuote > 0.0 ? math.min(budgetQuote, availQuote) : budgetQuote
+
+// === SPOT STATE MACHINE ===
+var float entryRef = na
+var float entryAtr = na
+var float entryQty = na
+var float stopLevel = na
+var float highSinceEntry = na
+var string stopKind = EXIT_STOP
+var int lastExitBar = na
+var int knownClosed = 0
+var int cntCandidates = 0
+var int cntPause = 0
+var int cntCost = 0
+var int cntEr = 0
+var int cntExt = 0
+var int cntHtf = 0
+var int cntSize = 0
+var int windowBars = 0
+var int positionBars = 0
+var float bhStart = na
+var float bhEnd = na
+var float bhNotional = na
+
+bool inWindow = time >= startTime and time < endTime
+bool buySignal = false
+bool sellSignal = false
+string sellReason = ""
+bool blockedSignal = false
+bool stopFilled = false
+bool stopRaised = false
+string blockText = ""
+float stopPct = na
+
+if barstate.isconfirmed
+    // Protective fills happen inside the bar; they are observed here, at close.
+    if strategy.closedtrades > knownClosed
+        string lastComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
+        knownClosed := strategy.closedtrades
+        if lastComment == EXIT_STOP or lastComment == EXIT_TRAIL
+            int lastTrade = strategy.closedtrades - 1
+            float lastValue = math.abs(strategy.closedtrades.size(lastTrade)) * strategy.closedtrades.entry_price(lastTrade)
+            stopFilled := true
+            stopPct := lastValue > 0 ? 100.0 * strategy.closedtrades.profit(lastTrade) / lastValue : na
+            lastExitBar := bar_index
+
+    if inWindow and readyOnClose
+        windowBars += 1
+        if na(bhStart)
+            bhStart := close
+            bhNotional := notionalCap
+        bhEnd := close
+        if strategy.position_size > 0
+            positionBars += 1
+
+    if strategy.position_size > 0
+        // EN POSITION : exits never depend on entry filters (ER, HTF, costs).
+        // Priority on one bar: protective fill (already done inside the bar),
+        // then invalidation, then stagnation, then end of test window.
+        // Use the simulated fill (next open) once known, not the signal close.
+        entryRef := strategy.position_avg_price
+        highSinceEntry := math.max(nz(highSinceEntry, high), high)
+        bool longFlat = flatBars >= rangeBars
+        bool netGain = close > strategy.position_avg_price * (1.0 + roundTrip)
+        if stepDirection == -1
+            sellReason := EXIT_INVALID
+        else if longFlat and (flatRuleEff == FLAT_EXIT or (flatRuleEff == FLAT_IF_NO_GAIN and not netGain))
+            sellReason := EXIT_STAGNATION
+        else if time >= endTime
+            sellReason := EXIT_END
+        if sellReason != ""
+            sellSignal := true
+            lastExitBar := bar_index
+            strategy.close(ENTRY_ID, comment = sellReason)
+        else
+            if trailOn and not na(entryAtr)
+                float trailDistance = trailAtr * entryAtr
+                if highSinceEntry >= entryRef + trailDistance
+                    float trailLevel = highSinceEntry - trailDistance
+                    // Ratchet: the protective level may only rise.
+                    if na(stopLevel) or trailLevel > stopLevel
+                        stopLevel := trailLevel
+                        stopKind := EXIT_TRAIL
+                        stopRaised := true
+            if not na(stopLevel)
+                strategy.exit(EXIT_ID, from_entry = ENTRY_ID, stop = stopLevel, comment = stopKind)
+    else
+        // A PLAT
+        entryRef := na
+        entryAtr := na
+        entryQty := na
+        stopLevel := na
+        highSinceEntry := na
+        if readyOnClose and inWindow and stepDirection == 1
+            cntCandidates += 1
+            float extension = (close - prevFiltBar) / rangeWidth
+            float plannedStop = stopOn ? filt - rangeWidth - stopBufferAtr * atrValue : na
+            float qtyRaw = notionalCap / close
+            if stopOn and maxRiskEur > 0.0
+                qtyRaw := math.min(qtyRaw, maxRiskEur * fxRate / (close - plannedStop + close * roundTrip))
+            float qty = math.floor(qtyRaw / qtyStep + 1e-9) * qtyStep
+            string blockReason = ""
+            if not na(lastExitBar) and bar_index <= lastExitBar + cooldownEff
+                blockReason := "PAUSE"
+                cntPause += 1
+            else if costGateOn and rangeWidth / close < costGateMult * roundTrip
+                blockReason := "COUTS"
+                cntCost += 1
+            else if erGateOn and efficiency < erMin
+                blockReason := "ER"
+                cntEr += 1
+            else if extGateOn and extension > extMax
+                blockReason := "EXTENSION"
+                cntExt += 1
+            else if not htfLong
+                blockReason := "HTF"
+                cntHtf += 1
+            else if qty <= 0.0 or qty * close < minNotional
+                blockReason := "TAILLE"
+                cntSize += 1
+            if blockReason == ""
+                buySignal := true
+                entryRef := close
+                entryAtr := atrValue
+                entryQty := qty
+                stopLevel := plannedStop
+                stopKind := EXIT_STOP
+                highSinceEntry := close
+                // Market order: filled at the next bar open, not at this close.
+                strategy.entry(ENTRY_ID, strategy.long, qty = qty, comment = "ACHAT")
+                if not na(stopLevel)
+                    strategy.exit(EXIT_ID, from_entry = ENTRY_ID, stop = stopLevel, comment = stopKind)
+            else
+                blockedSignal := true
+                blockText := blockReason == "COUTS" ? "COUTS : largeur / cout AR = " + str.tostring(rangeWidth / close / roundTrip, "0.0") + " < " + str.tostring(costGateMult, "0.0") : blockReason == "ER" ? "ER = " + str.tostring(efficiency, "0.00") + " < " + str.tostring(erMin, "0.00") : blockReason == "EXTENSION" ? "EXTENSION = " + str.tostring(extension, "0.0") + " > " + str.tostring(extMax, "0.0") : blockReason == "HTF" ? "HTF : cloture HTF sous son EMA" : blockReason == "TAILLE" ? "TAILLE : " + str.tostring(qty * close, "0.00") + " < minimum " + str.tostring(minNotional, "0.00") : "PAUSE apres une sortie"
+
+float lossAtStop = na(stopLevel) or na(entryQty) ? na : entryQty * (entryRef - stopLevel) + entryQty * entryRef * roundTrip
+
+// === VISUALS ===
+signed(float x, string f) =>
+    na(x) ? "n/a" : (x >= 0 ? "+" : "") + str.tostring(x, f)
+color dirColor = filterDirection == 1 ? colUp : filterDirection == -1 ? colDown : colFlat
+bool holding = strategy.position_size > 0
+bool tradeVisible = holding or buySignal
+float entryShown = holding ? strategy.position_avg_price : buySignal ? close : na
+string ccy = syminfo.currency
+plot(filt, "Filtre", color = dirColor, linewidth = lineWidth, style = plot.style_linebr)
+plot(showBands ? filt + rangeOnClose : na, "Bande haute", color = color.new(dirColor, 75), style = plot.style_linebr)
+plot(showBands and not tradeVisible ? filt - rangeOnClose : na, "Seuil d'invalidation (cloture)", color = color.new(dirColor, 60), style = plot.style_linebr)
+entryPlot = plot(tradeVisible ? entryShown : na, "Prix d'entree simule", color = color.new(color.white, 30), style = plot.style_linebr)
+stopPlot = plot(tradeVisible ? stopLevel : na, "Stop simule", color = color.orange, linewidth = 2, style = plot.style_linebr)
+pricePlot = plot(holding ? close : na, "Cloture (zone)", display = display.none)
+fill(entryPlot, stopPlot, color = color.new(colDown, 85), title = "Zone de risque")
+fill(entryPlot, pricePlot, color = holding and close >= entryShown ? color.new(colUp, 80) : color.new(colDown, 80), title = "Gain / perte latent")
+
+if showLabels and buySignal
+    string stopTip = na(stopLevel) ? "aucun" : str.tostring(stopLevel, format.mintick) + " (" + str.tostring(100.0 * (stopLevel / close - 1.0), "0.00") + " %)"
+    string buyTip = "Decision a la cloture : " + str.tostring(close, format.mintick) + "\nExecution simulee : ouverture suivante, non confirmee par l'exchange" + "\nQuantite : " + str.tostring(entryQty) + " (" + str.tostring(entryQty * close, "#,##0.00") + " " + ccy + ")" + "\nStop : " + stopTip + "\nPerte theorique au stop : " + (na(lossAtStop) ? "n/a" : str.tostring(lossAtStop / fxRate, "#,##0.00") + " EUR, hors gap")
+    label.new(bar_index, low, "ACHAT", yloc = yloc.belowbar, style = label.style_label_up, color = colUp, textcolor = color.black, size = size.small, tooltip = buyTip)
+if showLabels and sellSignal
+    float estPct = 100.0 * (close / strategy.position_avg_price - 1.0 - roundTrip)
+    string reasonText = sellReason == EXIT_INVALID ? "invalidation" : sellReason == EXIT_STAGNATION ? "stagnation" : "fin du test"
+    string sellTip = "Motif : " + reasonText + "\nDecision a la cloture : " + str.tostring(close, format.mintick) + "\nExecution simulee : ouverture suivante" + "\nResultat estime apres couts : " + signed(estPct, "0.00") + " %"
+    label.new(bar_index, high, "VENTE\n" + reasonText + "\n" + signed(estPct, "0.0") + " %", yloc = yloc.abovebar, style = label.style_label_down, color = sellReason == EXIT_INVALID ? colDown : colFlat, textcolor = color.white, size = size.small, tooltip = sellTip)
+if showLabels and stopFilled
+    string stopText = (stopKind == EXIT_TRAIL ? "SUIVEUSE" : "STOP") + "\n" + (na(stopPct) ? "" : signed(stopPct, "0.0") + " %")
+    label.new(bar_index, low, stopText, yloc = yloc.belowbar, style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.small, tooltip = "Stop simule touche dans la bougie.\nResultat apres couts : " + (na(stopPct) ? "n/a" : signed(stopPct, "0.00") + " %") + "\nEn reel : seul un ordre declencheur place sur l'exchange protege; le prix n'est pas garanti.")
+if showBlocked and blockedSignal
+    label.new(bar_index, low, "", yloc = yloc.belowbar, style = label.style_circle, color = color.new(colFlat, 20), size = size.tiny, tooltip = "Achat refuse : " + blockText)
+
+var string lastDecision = "aucune"
+var int lastDecisionBar = na
+if buySignal or sellSignal or stopFilled or blockedSignal
+    lastDecision := buySignal ? "ACHAT" : sellSignal ? "VENTE (" + sellReason + ")" : stopFilled ? "STOP touche" : "achat refuse (" + blockText + ")"
+    lastDecisionBar := bar_index
+
+plot(filterDirection, "Sens du filtre", display = display.data_window)
+plot(holding ? 1 : 0, "Position simulee", display = display.data_window)
+plot(erOnClose, "Efficiency Ratio", display = display.data_window)
+plot(rangeOnClose / close * 100.0, "Largeur (% du prix)", display = display.data_window)
+plot(rangeOnClose / close / roundTrip, "Largeur / cout aller-retour", display = display.data_window)
+plot(lossAtStop, "Perte theorique au stop (cotation)", display = display.data_window)
+
+// === ALERTS ===
+// One channel: create the alert with "alert() function calls only", once per bar close.
+// These are close signals. They do not prove that any order was filled on the exchange.
+alertJson(string action, string reason, float level) =>
+    '{"action":"' + action + '","reason":"' + reason + '","symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time) + ',"ref_close":' + str.tostring(close) + ',"qty_hint":' + str.tostring(nz(entryQty)) + ',"level":' + str.tostring(nz(level)) + ',"kind":"signal_at_close_not_an_order"}'
+
+if buySignal
+    alert(alertJson("BUY", "TREND_UP", stopLevel), alert.freq_once_per_bar_close)
+if sellSignal
+    alert(alertJson("SELL", sellReason, na), alert.freq_once_per_bar_close)
+if stopFilled
+    alert(alertJson("SIM_STOP_TOUCHED", "SIMULATED_INTRABAR", na), alert.freq_once_per_bar_close)
+if stopRaised
+    alert(alertJson("STOP_UPDATE", EXIT_TRAIL, stopLevel), alert.freq_once_per_bar_close)
+
+// === DASHBOARD ===
+var table liveTable = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 20), border_width = 1)
+var table resultTable = table.new(position.bottom_right, 2, 14, bgcolor = color.new(color.black, 20), border_width = 1)
+fmt(float x, string f) =>
+    na(x) ? "n/a" : str.tostring(x, f)
+row(table t, int r, string k, string v, color c) =>
+    table.cell(t, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_left)
+
+if barstate.islast and showLive
+    float openPct = holding ? 100.0 * (close / strategy.position_avg_price - 1.0) : na
+    int barsHeld = holding ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+    string dirText = not readyOnClose ? "INITIALISATION" : filterDirection == 1 ? "HAUSSE" : filterDirection == -1 ? "BAISSE" : "PLAT PROLONGE"
+    string stateText = buySignal ? "ACHAT envoye -> ouverture suivante" : sellSignal ? "VENTE envoyee -> ouverture suivante" : holding ? "EN POSITION  " + signed(openPct, "0.00") + " %  (" + str.tostring(barsHeld) + " bougies)" : "A PLAT"
+    string stopText = na(stopLevel) ? "aucun" : str.tostring(stopLevel, format.mintick) + "  (" + str.tostring(100.0 * (stopLevel / close - 1.0), "0.00") + " %, " + fmt(lossAtStop / fxRate, "#,##0") + " EUR max hors gap)"
+    string sinceText = na(lastDecisionBar) ? "" : "  il y a " + str.tostring(bar_index - lastDecisionBar) + " b."
+    bool costNow = not costGateOn or rangeOnClose / close >= costGateMult * roundTrip
+    bool erNow = not erGateOn or erOnClose >= erMin
+    string nextText = holding or buySignal ? "deja en position" : not costNow ? "non : largeur / cout " + fmt(rangeOnClose / close / roundTrip, "0.0") + " < " + str.tostring(costGateMult, "0.0") : not erNow ? "non : ER " + fmt(erOnClose, "0.00") + " < " + str.tostring(erMin, "0.00") : not htfLong ? "non : HTF baissier" : "oui, au prochain pas haussier"
+    row(liveTable, 0, "RF Spot V4", versionMode, color.white)
+    row(liveTable, 1, "Filtre", dirText, dirColor)
+    row(liveTable, 2, "Position simulee", stateText, holding ? (openPct >= 0 ? colUp : colDown) : color.white)
+    row(liveTable, 3, "Stop", stopText, color.orange)
+    row(liveTable, 4, "Derniere decision", lastDecision + sinceText, color.white)
+    row(liveTable, 5, "Achat possible ?", nextText, str.startswith(nextText, "oui") ? colUp : color.silver)
+
+if barstate.islast and showResults
+    // Very long histories drop the oldest trades; read only those still listed.
+    int firstTrade = strategy.closedtrades.first_index
+    int n = strategy.closedtrades - firstTrade
+    float winSum = 0.0
+    float lossSum = 0.0
+    int winCount = 0
+    float commSum = 0.0
+    float turnover = 0.0
+    float holdHours = 0.0
+    float retSum = 0.0
+    float retSq = 0.0
+    int cInv = 0
+    int cStag = 0
+    int cStop = 0
+    int cTrail = 0
+    int cEnd = 0
+    if n > 0
+        for i = firstTrade to strategy.closedtrades - 1
+            float p = strategy.closedtrades.profit(i)
+            float entryValue = math.abs(strategy.closedtrades.size(i)) * strategy.closedtrades.entry_price(i)
+            if p > 0
+                winSum += p
+                winCount += 1
+            else
+                lossSum += p
+            float r = entryValue > 0 ? 100.0 * p / entryValue : 0.0
+            retSum += r
+            retSq += r * r
+            commSum += strategy.closedtrades.commission(i)
+            turnover += entryValue + math.abs(strategy.closedtrades.size(i)) * strategy.closedtrades.exit_price(i)
+            holdHours += (strategy.closedtrades.exit_time(i) - strategy.closedtrades.entry_time(i)) / 3600000.0
+            string c = strategy.closedtrades.exit_comment(i)
+            cInv += c == EXIT_INVALID ? 1 : 0
+            cStag += c == EXIT_STAGNATION ? 1 : 0
+            cStop += c == EXIT_STOP ? 1 : 0
+            cTrail += c == EXIT_TRAIL ? 1 : 0
+            cEnd += c == EXIT_END ? 1 : 0
+    int lossCount = n - winCount
+    float net = winSum + lossSum
+    float gross = net + commSum
+    float meanRet = n > 0 ? retSum / n : na
+    float sdRet = n > 1 ? math.sqrt(math.max(0.0, (retSq - n * meanRet * meanRet) / (n - 1))) : na
+    float tStat = n > 1 and sdRet > 0 ? meanRet / (sdRet / math.sqrt(n)) : na
+    float effSide = turnover > 0 ? 100.0 * commSum / turnover : na
+    bool commMismatch = not na(effSide) and math.abs(effSide - sideCostPct) > 0.002
+    float bhPnl = na(bhStart) ? na : bhNotional * (bhEnd / bhStart - 1.0 - roundTrip)
+    row(resultTable, 0, "Trades / gagnants", str.tostring(n) + " / " + str.tostring(winCount) + (n > 0 ? " (" + str.tostring(100.0 * winCount / n, "0") + " %)" : ""), color.white)
+    row(resultTable, 1, "Net apres couts", fmt(net, "#,##0.00") + " " + ccy, net >= 0 ? colUp : colDown)
+    row(resultTable, 2, "Esperance / trade (t)", fmt(meanRet, "0.000") + " %  (t = " + fmt(tStat, "0.0") + ")", color.white)
+    row(resultTable, 3, "Gain moy. / perte moy.", fmt(winCount > 0 ? winSum / winCount : na, "#,##0.00") + " / " + fmt(lossCount > 0 ? lossSum / lossCount : na, "#,##0.00"), color.white)
+    row(resultTable, 4, "Profit factor", fmt(lossSum < 0 ? winSum / -lossSum : na, "0.00"), color.white)
+    row(resultTable, 5, "Drawdown max", fmt(strategy.max_drawdown, "#,##0.00") + " " + ccy + " (" + fmt(100.0 * strategy.max_drawdown / bhNotional, "0.0") + " % du montant)", color.white)
+    row(resultTable, 6, "Exposition / duree moy.", fmt(windowBars > 0 ? 100.0 * positionBars / float(windowBars) : na, "0.0") + " % / " + fmt(n > 0 ? holdHours / n : na, "0.0") + " h", color.white)
+    row(resultTable, 7, "Couts / part du brut", fmt(commSum, "#,##0.00") + " / " + (gross > 0 ? str.tostring(100.0 * commSum / gross, "0") + " %" : "brut <= 0"), color.white)
+    row(resultTable, 8, "Achat-conservation", fmt(bhPnl, "#,##0.00") + " " + ccy, color.white)
+    row(resultTable, 9, "Commission eff. / supposee", fmt(effSide, "0.000") + " / " + str.tostring(sideCostPct, "0.000") + " %" + (commMismatch ? " -> regler Proprietes" : ""), commMismatch ? color.orange : color.white)
+    row(resultTable, 10, "Achats refuses / candidats", str.tostring(cntPause + cntCost + cntEr + cntExt + cntHtf + cntSize) + " / " + str.tostring(cntCandidates) + "  (couts " + str.tostring(cntCost) + ", ER " + str.tostring(cntEr) + ", ext. " + str.tostring(cntExt) + ", HTF " + str.tostring(cntHtf) + ", pause " + str.tostring(cntPause) + ", taille " + str.tostring(cntSize) + ")", color.white)
+    row(resultTable, 11, "Sorties par motif", "inval. " + str.tostring(cInv) + ", stag. " + str.tostring(cStag) + ", stop " + str.tostring(cStop) + ", suiv. " + str.tostring(cTrail) + ", fin " + str.tostring(cEnd), color.white)
+    row(resultTable, 12, "Montant par trade", str.tostring(budgetEur, "#,##0") + " EUR -> " + fmt(notionalCap, "#,##0.00") + " " + ccy + (fxIsAuto ? " (EURUSD veille)" : " (taux manuel)") + ", " + str.tostring(qtyDec) + " dec." + (decKnown or szDecIn >= 0 ? "" : " NON VERIFIE"), decKnown or szDecIn >= 0 ? color.white : color.orange)
+    row(resultTable, 13, "Avertissement", "Simulation OHLC. Aucune lecture ni ordre Hyperliquid.", color.gray)

@@ -1,0 +1,477 @@
+// Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International.
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+// Original: Range Filter Trend [QuantAlgo], © QuantAlgo.
+// Adaptation for Samet, 2026-10-03: guarded range, regime detection,
+// reversal confirmation, optional adaptation/HTF, confirmed-bar outputs.
+// V2 refinement: ER gates fresh confirmations without forcing an immediate
+// neutral exit from an established trend; blocked confirmation evidence resets.
+// Continuing filter steps require a new source extreme since the last step.
+// V2.1: the first opposite filter step invalidates the accepted trend
+// before ER/HTF/confirmation gates; neutral until a new trend confirms.
+// V3: display the observed filter direction independently of entries.
+// Default entries retain V2.1. The explicit experimental mode replaces
+// the ER veto by a bounded displacement threshold frozen at the first step.
+// V3.1: reactive entries on the first accepted filter step at bar close.
+// No additional ER/step/displacement entry gate in the reactive mode.
+// The price filter and optional HTF constraint remain unchanged.
+// V3.2: optional session window and news-candle guard for new entries only;
+// exits are never blocked. On-chart paired score: every filter flip versus
+// the gated signals, net of a user-set cost, in units of the band width r,
+// with a t-statistic. A flip needs a 2r retracement from the extreme close:
+// the opposite band is a trailing stop-and-reverse on close. For a random
+// walk a trade averages 0 r before cost, with ~37% winners (1/e) and a
+// win/loss ratio near 1.7, so the win rate alone proves nothing.
+// This derivative retains the original attribution and license. No affiliation implied.
+//@version=6
+indicator("Range Filter Trend — V3.2", overlay = true, max_bars_back = 5000)
+
+const string G_CORE = "1. Filtre"
+const string G_REGIME = "2. Detection des ranges"
+const string G_CONFIRM = "3. Confirmation des signaux"
+const string G_HTF = "4. Tendance unite superieure (optionnel)"
+const string G_SESSION = "5. Sessions et score"
+const string G_VISUAL = "6. Affichage"
+
+engineMode = input.string("Reactif V3.1", "Moteur", options = ["Reactif V3.1", "Lecture V3", "Progressif V3 (experimental)", "Affine V2.1", "Ameliore V1", "Original securise"], group = G_CORE, tooltip = "Reactif V3.1 : signal L/S au premier pas du filtre dans le nouveau sens, a la cloture. ER, nombre de pas et distance de confirmation n'ajoutent aucun delai. Le filtre HTF optionnel reste respecte et peut retarder ou empecher un signal. Lecture V3 conserve les entrees prudentes; les autres modes restent disponibles pour comparaison. Plus reactif ne signifie pas plus rentable.")
+presetMode = input.string("Default", "Preset", options = ["Default", "Fast Response", "Smooth Trend"], group = G_CORE)
+srcInput = input.source(close, "Source prix", group = G_CORE, tooltip = "Utiliser une source exprimee en prix. Une source externe qui repeint peut aussi modifier cet indicateur.")
+smoothingType = input.string("EMA", "Lissage", options = ["EMA", "SMA", "WMA", "HMA", "RMA", "DEMA", "TEMA", "VWMA", "LSMA", "ALMA"], group = G_CORE)
+periodIn = input.int(100, "Periode", minval = 2, maxval = 1000, group = G_CORE)
+multIn = input.float(3.0, "Multiplicateur", minval = 0.5, step = 0.25, group = G_CORE)
+atrLen = input.int(14, "Periode ATR", minval = 2, maxval = 200, group = G_CORE)
+atrFloor = input.float(0.25, "Largeur minimale / ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = G_CORE, tooltip = "Empeche une largeur presque nulle, notamment avec HMA/DEMA/TEMA/LSMA. 0 desactive ce plancher; le minimum d'un tick reste actif.")
+useAdaptive = input.bool(false, "Adapter le multiplicateur au regime", group = G_CORE, tooltip = "Option experimentale, desactivee par defaut. Elargit le filtre quand les mouvements sont inefficaces, le resserre quand ils sont directionnels. A comparer au mode fixe.")
+adaptiveStrength = input.float(0.25, "Force de l'adaptation", minval = 0.0, maxval = 0.75, step = 0.05, group = G_CORE)
+
+useRegime = input.bool(true, "Utiliser l'efficacite (ER)", group = G_REGIME, tooltip = "ER = deplacement net / somme des mouvements. Une valeur proche de 0 indique des allers-retours; proche de 1, un mouvement directionnel. En Reactif V3.1, ER sert au diagnostic et ne bloque pas les signaux. En Lecture V3, ER filtre les signaux L/S mais ne bloque pas la direction affichee. En mode Progressif experimental, il renforce la distance de confirmation entre 1 et 4 fois la base. Ce n'est pas une probabilite de gain. Au hasard pur, ER(20) vaut deja ~0.22 en moyenne et depasse 0.30 environ 27% du temps.")
+erLen = input.int(20, "Periode ER", minval = 2, maxval = 500, group = G_REGIME)
+erEnter = input.float(0.30, "ER haut / activation", minval = 0.01, maxval = 1.0, step = 0.01, group = G_REGIME)
+erExit = input.float(0.18, "ER bas / pause", minval = 0.0, maxval = 0.99, step = 0.01, group = G_REGIME, tooltip = "Doit etre inferieur au seuil d'activation. Ces seuils ne bloquent aucun signal Reactif V3.1. Lecture V3 et les modes historiques les utilisent pour les signaux confirmes. Dans le mode Progressif experimental, ils servent seulement au diagnostic de qualite. Les deux seuils evitent les bascules autour d'une valeur unique.")
+useFlatNeutral = input.bool(true, "Revenir neutre apres un filtre plat", group = G_REGIME)
+rangeBarsIn = input.int(20, "Bougies plates avant neutre", minval = 1, maxval = 500, group = G_REGIME)
+
+confirmSteps = input.int(2, "Pas du filtre dans le nouveau sens", minval = 1, maxval = 10, group = G_CONFIRM, tooltip = "Ignore en Reactif V3.1, qui signale au premier pas. Pour les autres modes, un pas oppose remet le compteur a zero. Une bougie plate ne le fait pas avancer. Une nouvelle entree exige un nouveau pas; aucun signal recycle pendant une pause.")
+confirmAtr = input.float(0.25, "Base de confirmation / ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = G_CONFIRM, tooltip = "Ignore en Reactif V3.1. Lecture V3 exige la base en ATR et un ER directionnel. Progressif experimental exige Base x [1 + 3 x (1 - ER)] ATR si ER est active : avec 0.25, de 0.25 a 1 ATR. ATR et ER sont figes au premier pas. Un signal exige aussi le nombre de pas requis et un nouveau pas. 0 desactive le seuil de distance.")
+
+useHtf = input.bool(false, "Filtrer les nouvelles entrees par l'HTF", group = G_HTF)
+htfInput = input.timeframe("240", "Unite superieure", group = G_HTF)
+htfLen = input.int(200, "Periode EMA HTF", minval = 2, maxval = 1000, group = G_HTF, tooltip = "Derniere cloture HTF strictement au-dessus de son EMA pour un signal haussier, en dessous pour un signal baissier. Uniquement des bougies HTF terminees. Ne force pas la sortie d'une tendance deja active.")
+
+useSession = input.bool(false, "Nouveaux signaux seulement en session", group = G_SESSION, tooltip = "Hypothese a verifier, desactivee par defaut : elle peut faire rater le debut d'un grand mouvement qui part hors session. Les petits l/s gris montrent les signaux qu'elle bloquerait. Hors de ces heures, aucun nouveau signal L/S. Les sorties ne sont jamais bloquees. Le score 'Base en session' / 'Base hors session' teste cette hypothese sur les memes bougies.")
+sessionIn = input.session("0900-1800", "Heures actives", group = G_SESSION, tooltip = "Par defaut Londres puis debut de New York, en heure de Paris.")
+sessionTz = input.string("Europe/Paris", "Fuseau horaire des heures", group = G_SESSION)
+useSpikeGuard = input.bool(false, "Ignorer les bougies d'annonce", group = G_SESSION, tooltip = "Hypothese non verifiee, desactivee par defaut : elle peut aussi retirer les meilleurs mouvements. A tester seule, une chose a la fois. Aucun nouveau signal sur une bougie dont le plus haut - plus bas depasse ce multiple de l'ATR de la bougie precedente (NFP, CPI, FOMC...). Les sorties restent actives.")
+spikeAtr = input.float(3.0, "Bougie d'annonce / ATR", minval = 1.0, maxval = 10.0, step = 0.5, group = G_SESSION)
+tradeCost = input.float(0.30, "Cout par trade (prix)", minval = 0.0, step = 0.05, group = G_SESSION, tooltip = "Spread + commission + slippage d'un aller-retour, en unite de prix. Sur l'or : 0.30 = 30 cents par once. Mettre celui de ton broker MT5.")
+showScore = input.bool(true, "Afficher le score", group = G_SESSION, tooltip = "Base = chaque retournement du filtre, sans aucun filtre d'entree. Tes signaux = L/S avec tes reglages. Trade d'un changement au suivant, a la cloture, cout deduit, en r (largeur de bande a l'entree). Format : trades | % gagnants | gain moyen | t. Au hasard pur : ~37% gagnants et 0 r. Seul t compte : entre -2 et +2, impossible de distinguer du hasard.")
+
+colorPreset = input.string("Custom", "Palette", options = ["Custom", "Classic", "Aqua", "Cosmic", "Cyber", "Neon"], group = G_VISUAL)
+bullCustom = input.color(#00ffaa, "Haussier", group = G_VISUAL)
+bearCustom = input.color(#ff0000, "Baissier", group = G_VISUAL)
+neutCustom = input.color(#808080, "Neutre", group = G_VISUAL)
+lineWidth = input.int(3, "Epaisseur", minval = 1, maxval = 8, group = G_VISUAL)
+showBands = input.bool(true, "Afficher les bandes", group = G_VISUAL, tooltip = "Enveloppe autour du filtre apres son calcul. Les bandes affichees ne sont pas des niveaux de cassure fixes pour la prochaine bougie.")
+showFill = input.bool(true, "Remplir les bandes", group = G_VISUAL)
+showMarkers = input.bool(true, "Afficher les signaux L/S", group = G_VISUAL)
+showDirectionMarkers = input.bool(false, "Afficher les fleches de direction", group = G_VISUAL, tooltip = "Fleches : sens du filtre. Triangles L/S : signaux du mode choisi. En Reactif sans HTF ni session, ils coincident : les fleches sont masquees par defaut pour eviter les doublons. Les fleches suivent la cloture de la bougie.")
+showNeutral = input.bool(false, "Afficher les annulations de signal", group = G_VISUAL)
+colorBars = input.bool(false, "Colorer les bougies", group = G_VISUAL)
+barTrans = input.int(20, "Transparence bougies", minval = 0, maxval = 100, group = G_VISUAL)
+colorBg = input.bool(false, "Colorer le fond", group = G_VISUAL)
+bgTrans = input.int(90, "Transparence fond", minval = 0, maxval = 100, group = G_VISUAL)
+showDashboard = input.bool(true, "Afficher le diagnostic", group = G_VISUAL)
+
+// === ENGINE START ===
+bool enhanced = engineMode != "Original securise"
+bool progressive = engineMode == "Progressif V3 (experimental)"
+bool reactive = engineMode == "Reactif V3.1"
+bool directionalView = reactive or progressive or engineMode == "Lecture V3"
+bool refined = directionalView or engineMode == "Affine V2.1"
+bool htfEnabled = enhanced and useHtf
+int per = presetMode == "Fast Response" ? 50 : presetMode == "Smooth Trend" ? 200 : periodIn
+float mult = presetMode == "Fast Response" ? 2.0 : presetMode == "Smooth Trend" ? 4.0 : multIn
+int rangeBars = presetMode == "Fast Response" ? 10 : presetMode == "Smooth Trend" ? 30 : rangeBarsIn
+
+if barstate.isfirst
+    if enhanced and not reactive and useRegime and erExit >= erEnter
+        runtime.error("Le seuil ER de sortie doit etre inferieur au seuil d'activation.")
+    if htfEnabled and timeframe.in_seconds(htfInput) <= timeframe.in_seconds()
+        runtime.error("Choisir une unite HTF strictement superieure a celle du graphique.")
+
+smoothRange(float x, simple int len, simple string kind) =>
+    float ema1 = ta.ema(x, len)
+    float ema2 = ta.ema(ema1, len)
+    float ema3 = ta.ema(ema2, len)
+    float smaVal = ta.sma(x, len)
+    float wmaVal = ta.wma(x, len)
+    float hmaVal = ta.hma(x, len)
+    float rmaVal = ta.rma(x, len)
+    float vwmaVal = ta.vwma(x, len)
+    float lsmaVal = ta.linreg(x, len, 0)
+    float almaVal = ta.alma(x, len, 0.85, 6.0)
+    switch kind
+        "SMA" => smaVal
+        "WMA" => wmaVal
+        "HMA" => hmaVal
+        "RMA" => rmaVal
+        "DEMA" => 2.0 * ema1 - ema2
+        "TEMA" => 3.0 * (ema1 - ema2) + ema3
+        "VWMA" => na(volume) or na(vwmaVal) ? ema1 : vwmaVal
+        "LSMA" => lsmaVal
+        "ALMA" => almaVal
+        => ema1
+
+float rawRange = math.abs(srcInput - srcInput[1])
+float firstPass = smoothRange(rawRange, per, smoothingType)
+float safeFirstPass = enhanced ? math.max(firstPass, 0.0) : firstPass
+float secondPass = smoothRange(safeFirstPass, per * 2 - 1, smoothingType)
+float atrValue = ta.atr(atrLen)
+float travel = math.sum(rawRange, erLen)
+float netMove = math.abs(srcInput - srcInput[erLen])
+float erRaw = na(travel) or na(netMove) ? na : travel > 0.0 ? math.min(1.0, netMove / travel) : 0.0
+float efficiency = ta.ema(erRaw, 3)
+float adaptiveFactor = enhanced and useAdaptive ? 1.0 + adaptiveStrength * (1.0 - 2.0 * nz(efficiency, 0.5)) : 1.0
+float minimumRange = enhanced ? math.max(syminfo.mintick, nz(atrValue) * atrFloor) : syminfo.mintick
+float calculatedRange = na(secondPass) ? na : math.max(secondPass * mult * adaptiveFactor, minimumRange)
+int warmupBars = math.max(per * 3, math.max(erLen + 3, atrLen))
+bool sourceReady = not na(srcInput) and not na(srcInput[1])
+bool ready = sourceReady and not na(calculatedRange) and (not enhanced or (bar_index >= warmupBars and not na(atrValue) and not na(efficiency)))
+
+// [1] + lookahead_on retrieves only the previous, completed HTF candle.
+// The chart timeframe is requested when disabled; its result is then unused.
+[htfClose, htfAverage] = request.security(syminfo.tickerid, htfEnabled ? htfInput : timeframe.period, [close[1], ta.ema(close, htfLen)[1]], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+bool htfLong = not htfEnabled or (not na(htfAverage) and htfClose > htfAverage)
+bool htfShort = not htfEnabled or (not na(htfAverage) and htfClose < htfAverage)
+
+// New entries only: invalidations and pauses below are never gated.
+// The spike test uses the previous ATR so the spike cannot inflate it.
+bool inSession = not na(time(timeframe.period, sessionIn, sessionTz))
+bool spikeBar = useSpikeGuard and not na(atrValue[1]) and high - low > spikeAtr * atrValue[1]
+bool entryAllowed = not enhanced or ((not useSession or inSession) and not spikeBar)
+
+var float filt = na
+var float rangeOnClose = na
+var float erOnClose = na
+var float atrOnClose = na
+var int signalState = 0
+var int flatBars = 0
+var bool trendingRegime = false
+var int legDirection = 0
+var int legSteps = 0
+var float legAnchor = na
+var float legAtr = na
+var float legEfficiency = na
+var float requiredMove = na
+var int filterDirection = 0
+var bool readyOnClose = false
+var int lastStepDirection = 0
+var float lastStepSource = na
+
+// Persistent state and all displayed engine values change only at bar close.
+if barstate.isconfirmed
+    rangeOnClose := calculatedRange
+    erOnClose := efficiency
+    atrOnClose := atrValue
+    readyOnClose := ready
+    if not ready
+        filt := enhanced ? na : srcInput
+        signalState := 0
+        flatBars := 0
+        filterDirection := 0
+        trendingRegime := false
+        legDirection := 0
+        legSteps := 0
+        legAnchor := na
+        legAtr := na
+        legEfficiency := na
+        requiredMove := na
+        lastStepDirection := 0
+        lastStepSource := na
+    else
+        float prevFilt = nz(filt, srcInput)
+        float candidate = srcInput > prevFilt ? math.max(prevFilt, srcInput - calculatedRange) : math.min(prevFilt, srcInput + calculatedRange)
+        // A shrinking range alone must not advance the enhanced filter.
+        bool priceSupportsStep = candidate > prevFilt ? srcInput > srcInput[1] : candidate < prevFilt ? srcInput < srcInput[1] : true
+        filt := enhanced and not priceSupportsStep ? prevFilt : candidate
+        int stepDirection = filt > prevFilt ? 1 : filt < prevFilt ? -1 : 0
+        // Repeated highs/lows must not advance the filter merely because
+        // its range contracts. A continuation needs actual price progress.
+        if refined and stepDirection != 0 and stepDirection == lastStepDirection
+            bool newExtreme = stepDirection == 1 ? srcInput > lastStepSource : srcInput < lastStepSource
+            if not newExtreme
+                filt := prevFilt
+                stepDirection := 0
+        if stepDirection != 0
+            lastStepDirection := stepDirection
+            lastStepSource := srcInput
+        flatBars := stepDirection == 0 ? flatBars + 1 : 0
+        if stepDirection != 0
+            filterDirection := stepDirection
+        else if useFlatNeutral and flatBars >= rangeBars
+            filterDirection := 0
+        if efficiency >= erEnter
+            trendingRegime := true
+        else if efficiency <= erExit
+            trendingRegime := false
+
+        // Invalidation must never be blocked by entry filters. Reset
+        // the old evidence first; this bar may begin a fresh leg below.
+        if refined and signalState != 0 and stepDirection == -signalState
+            signalState := 0
+            legDirection := 0
+            legSteps := 0
+            legAnchor := na
+            legAtr := na
+            legEfficiency := na
+            requiredMove := na
+
+        if not enhanced
+            if stepDirection != 0
+                signalState := stepDirection
+            else if useFlatNeutral and flatBars >= rangeBars
+                signalState := 0
+        else
+            bool ranging = useRegime and not trendingRegime
+            bool longPause = useFlatNeutral and flatBars >= rangeBars
+            if longPause or (ranging and not refined)
+                signalState := 0
+                legDirection := 0
+                legSteps := 0
+                legAnchor := na
+                legAtr := na
+                legEfficiency := na
+                requiredMove := na
+            else if reactive
+                // The range filter already rejects moves inside its band.
+                // Do not add the old confirmation delay to its first step.
+                if stepDirection != 0
+                    legDirection := stepDirection
+                    legSteps := 1
+                    legAnchor := prevFilt
+                    legAtr := atrValue
+                    legEfficiency := efficiency
+                    requiredMove := 0.0
+                    bool directionAllowed = stepDirection == 1 ? htfLong : htfShort
+                    if directionAllowed and entryAllowed
+                        signalState := stepDirection
+            else if ranging and not progressive
+                // Keep only a non-invalidated trend; never recycle evidence from
+                // a movement that occurred while new signals were blocked.
+                legDirection := 0
+                legSteps := 0
+                legAnchor := na
+                legAtr := na
+                legEfficiency := na
+                requiredMove := na
+            else if stepDirection != 0
+                if stepDirection != legDirection
+                    legDirection := stepDirection
+                    legSteps := 1
+                    legAnchor := prevFilt
+                    legAtr := atrValue
+                    legEfficiency := efficiency
+                else
+                    legSteps += 1
+                float displacement = math.abs(filt - legAnchor)
+                // Evidence persists through low ER. The finite threshold
+                // is fixed for this leg, so a volatility contraction alone
+                // cannot produce a new signal. A fresh step is still required.
+                float effortFactor = progressive and useRegime ? 1.0 + 3.0 * (1.0 - legEfficiency) : 1.0
+                requiredMove := legAtr * confirmAtr * effortFactor
+                bool confirmedMove = legSteps >= confirmSteps and displacement >= requiredMove
+                bool directionAllowed = stepDirection == 1 ? htfLong : htfShort
+                if confirmedMove and directionAllowed and entryAllowed
+                    signalState := stepDirection
+
+int prevState = nz(signalState[1], 0)
+bool turnedBull = barstate.isconfirmed and ready and signalState == 1 and prevState != 1
+bool turnedBear = barstate.isconfirmed and ready and signalState == -1 and prevState != -1
+bool turnedNeut = barstate.isconfirmed and signalState == 0 and prevState != 0
+bool signalChanged = turnedBull or turnedBear or turnedNeut
+int prevFilterDirection = nz(filterDirection[1], 0)
+bool directionChanged = barstate.isconfirmed and filterDirection != prevFilterDirection
+// === ENGINE END ===
+
+// === SCORE START ===
+// Paired comparison on the same bars. Base: every flip of the filter,
+// without any entry gate. Signals: L/S of the chosen settings. A trade
+// runs from one state change to the next, both at the close, minus the
+// cost, in units of the band width r at entry. Per-trade dispersion is
+// about 2-3 r, so a small edge needs thousands of trades: only |t| >= 2
+// separates a result from luck, and a drifting market can fake it
+// (compare longs and shorts).
+type Score
+    int n = 0
+    int wins = 0
+    float sumR = 0.0
+    float sumR2 = 0.0
+
+method add(Score this, float x) =>
+    this.n := this.n + 1
+    this.wins := this.wins + (x > 0.0 ? 1 : 0)
+    this.sumR := this.sumR + x
+    this.sumR2 := this.sumR2 + x * x
+
+method tStat(Score this) =>
+    float result = na
+    if this.n > 1
+        float mean = this.sumR / this.n
+        float variance = math.max(this.sumR2 - this.n * mean * mean, 0.0) / (this.n - 1)
+        if variance > 0.0
+            result := mean / math.sqrt(variance / this.n)
+    result
+
+signedText(float x) =>
+    (x >= 0.0 ? "+" : "") + str.tostring(x, "0.00")
+
+method summary(Score this) =>
+    string result = "aucun trade"
+    if this.n > 0
+        float t = this.tStat()
+        result := str.tostring(this.n) + " | " + str.tostring(100.0 * this.wins / this.n, "0") + "% | " + signedText(this.sumR / this.n) + " r | t " + (na(t) ? "n/a" : signedText(t))
+    result
+
+// Colour by statistical significance, not by sign.
+method tColor(Score this, color up, color down) =>
+    float t = this.tStat()
+    na(t) ? color.white : t >= 2.0 ? up : t <= -2.0 ? down : color.silver
+
+var Score baseAll = Score.new()
+var Score baseIn = Score.new()
+var Score baseOut = Score.new()
+var Score sigAll = Score.new()
+var Score sigLong = Score.new()
+var Score sigShort = Score.new()
+var float baseRangeSum = 0.0
+var int baseDir = 0
+var float baseEntry = na
+var float baseRange = na
+var bool baseInSession = false
+var int sigDir = 0
+var float sigEntry = na
+var float sigRange = na
+
+bool rangeValid = not na(rangeOnClose) and rangeOnClose > 0.0
+if barstate.isconfirmed and filterDirection != baseDir
+    if baseDir != 0
+        float baseResult = (baseDir * (close - baseEntry) - tradeCost) / baseRange
+        baseAll.add(baseResult)
+        if baseInSession
+            baseIn.add(baseResult)
+        else
+            baseOut.add(baseResult)
+        baseRangeSum += baseRange
+    baseDir := rangeValid ? filterDirection : 0
+    baseEntry := close
+    baseRange := rangeOnClose
+    baseInSession := inSession
+
+if barstate.isconfirmed and signalState != sigDir
+    if sigDir != 0
+        float sigResult = (sigDir * (close - sigEntry) - tradeCost) / sigRange
+        sigAll.add(sigResult)
+        if sigDir == 1
+            sigLong.add(sigResult)
+        else
+            sigShort.add(sigResult)
+    sigDir := rangeValid ? signalState : 0
+    sigEntry := close
+    sigRange := rangeOnClose
+// === SCORE END ===
+
+// === VISUALS START ===
+[bullCol, bearCol, neutCol] = switch colorPreset
+    "Classic" => [#00ff00, #ff0000, #808080]
+    "Aqua" => [#00d4ff, #ff8c00, #808080]
+    "Cosmic" => [#49ffce, #9932cc, #808080]
+    "Cyber" => [#00cccc, #ff6600, #808080]
+    "Neon" => [#ffff00, #ff00ff, #808080]
+    => [bullCustom, bearCustom, neutCustom]
+
+color signalColor = signalState == 1 ? bullCol : signalState == -1 ? bearCol : neutCol
+int displayedDirection = directionalView ? filterDirection : signalState
+color directionColor = displayedDirection == 1 ? bullCol : displayedDirection == -1 ? bearCol : neutCol
+float hBand = filt + rangeOnClose
+float lBand = filt - rangeOnClose
+filtPlot = plot(filt, "Range Filter", color = directionColor, linewidth = lineWidth, style = plot.style_linebr)
+upperPlot = plot(showBands ? hBand : na, "Upper Range Band", color = color.new(directionColor, 70), style = plot.style_linebr)
+lowerPlot = plot(showBands ? lBand : na, "Lower Range Band", color = color.new(directionColor, 70), style = plot.style_linebr)
+color edgeColor = color.new(directionColor, showBands and showFill ? 80 : 100)
+color centerColor = color.new(directionColor, 100)
+fill(filtPlot, upperPlot, top_value = hBand, bottom_value = filt, top_color = edgeColor, bottom_color = centerColor, title = "Upper Band Fill")
+fill(lowerPlot, filtPlot, top_value = filt, bottom_value = lBand, top_color = centerColor, bottom_color = edgeColor, title = "Lower Band Fill")
+plotshape(directionalView and showDirectionMarkers and directionChanged and filterDirection == 1, title = "Filter Direction Up Marker", style = shape.arrowup, location = location.belowbar, color = bullCol, size = size.tiny)
+plotshape(directionalView and showDirectionMarkers and directionChanged and filterDirection == -1, title = "Filter Direction Down Marker", style = shape.arrowdown, location = location.abovebar, color = bearCol, size = size.tiny)
+plotshape(showMarkers and turnedBull, title = "Bullish Trend Change", style = shape.triangleup, location = location.belowbar, color = bullCol, size = size.small, text = "L")
+plotshape(showMarkers and turnedBear, title = "Bearish Trend Change", style = shape.triangledown, location = location.abovebar, color = bearCol, size = size.small, text = "S")
+plotshape(showNeutral and turnedNeut, title = "Neutral State", style = shape.xcross, location = location.abovebar, color = neutCol, size = size.tiny)
+// A reactive flip refused by an entry gate (session, news candle, HTF):
+// shows exactly which signals those filters remove.
+bool blockedFlip = reactive and directionChanged and readyOnClose and filterDirection != 0 and signalState != filterDirection
+plotshape(showMarkers and blockedFlip and filterDirection == 1, title = "Blocked Long", style = shape.triangleup, location = location.belowbar, color = color.new(neutCol, 20), size = size.tiny, text = "l")
+plotshape(showMarkers and blockedFlip and filterDirection == -1, title = "Blocked Short", style = shape.triangledown, location = location.abovebar, color = color.new(neutCol, 20), size = size.tiny, text = "s")
+barcolor(colorBars ? color.new(directionColor, barTrans) : na)
+bgcolor(colorBg ? color.new(directionColor, bgTrans) : na)
+plot(signalState, "Signal State", display = display.data_window)
+plot(filterDirection, "Filter Direction", display = display.data_window)
+plot(legSteps, "Confirmation Steps", display = display.data_window)
+plot(requiredMove, "Required Displacement", display = display.data_window)
+plot(erOnClose, "Efficiency Ratio", display = display.data_window)
+plot(rangeOnClose, "Range Width", display = display.data_window)
+plot(readyOnClose ? 1 : 0, "Ready", display = display.data_window)
+plot(entryAllowed ? 1 : 0, "Entry Allowed", display = display.data_window)
+
+var table dashboard = table.new(position.top_right, 2, 15, bgcolor = color.new(color.black, 15), border_width = 1)
+if barstate.islast and showDashboard
+    string directionText = not readyOnClose ? "INITIALISATION" : filterDirection == 1 ? "HAUSSE" : filterDirection == -1 ? "BAISSE" : "PLAT PROLONGE"
+    string stateText = not readyOnClose ? "INITIALISATION" : signalState == 1 ? "LONG VALIDE" : signalState == -1 ? "SHORT VALIDE" : "AUCUN"
+    // The opposite band is the stop-and-reverse level, judged on close.
+    string exitText = signalState == 1 ? "cloture < " + str.tostring(filt - rangeOnClose, format.mintick) : signalState == -1 ? "cloture > " + str.tostring(filt + rangeOnClose, format.mintick) : "n/a"
+    string regimeText = not enhanced or not useRegime ? "OFF" : reactive ? "DIAGNOSTIC / SANS VETO" : trendingRegime ? "DIRECTIONNEL" : progressive ? "BRUITE / SEUIL RENFORCE" : "CONFIRMATIONS BLOQUEES"
+    string htfText = not htfEnabled ? "OFF" : na(htfAverage) ? "INITIALISATION" : htfLong ? "LONG" : htfShort ? "SHORT" : "NEUTRE"
+    string progressText = not readyOnClose ? "INITIALISATION" : reactive ? "1er pas, aucun delai" : na(requiredMove) ? "EN ATTENTE" : str.tostring(legSteps) + " pas / " + str.tostring(confirmSteps) + " requis | distance " + str.tostring(requiredMove, format.mintick)
+    string sessionText = (inSession ? "EN SESSION" : "HORS SESSION") + (useSession ? " / filtre ON" : " / filtre OFF") + (useSpikeGuard ? " / annonces OFF" : "")
+    string costText = baseAll.n == 0 ? "n/a" : str.tostring(tradeCost, format.mintick) + " = " + str.tostring(tradeCost / (baseRangeSum / baseAll.n), "0.00") + " r moyen"
+    string scoreTip = "trades | % gagnants | gain moyen apres cout, en r | t. Entre -2 et +2 : impossible de distinguer du hasard (gris)."
+    table.cell(dashboard, 0, 0, "RF V3.2 / Sens du filtre", text_color = color.white)
+    table.cell(dashboard, 1, 0, directionText, text_color = filterDirection == 1 ? bullCol : filterDirection == -1 ? bearCol : neutCol)
+    table.cell(dashboard, 0, 1, "Signal L/S", text_color = color.white)
+    table.cell(dashboard, 1, 1, stateText, text_color = signalColor)
+    table.cell(dashboard, 0, 2, "Sortie / retournement si", text_color = color.white)
+    table.cell(dashboard, 1, 2, exitText, text_color = color.white, tooltip = "Bande opposee, jugee a la cloture. Pas un stop garanti : une bougie d'annonce peut la depasser de beaucoup.")
+    table.cell(dashboard, 0, 3, "Session", text_color = color.white)
+    table.cell(dashboard, 1, 3, sessionText, text_color = color.white)
+    table.cell(dashboard, 0, 4, "Filtre HTF", text_color = color.white)
+    table.cell(dashboard, 1, 4, htfText, text_color = color.white)
+    table.cell(dashboard, 0, 5, "ER / qualite recente", text_color = color.white)
+    table.cell(dashboard, 1, 5, str.tostring(erOnClose, "0.00") + " / " + regimeText, text_color = color.white)
+    table.cell(dashboard, 0, 6, "Confirmation", text_color = color.white)
+    table.cell(dashboard, 1, 6, progressText, text_color = color.white)
+    table.cell(dashboard, 0, 7, "Base : tous les flips", text_color = color.white)
+    table.cell(dashboard, 1, 7, showScore ? baseAll.summary() : "masque", text_color = baseAll.tColor(bullCol, bearCol), tooltip = scoreTip)
+    table.cell(dashboard, 0, 8, "Base en session", text_color = color.white)
+    table.cell(dashboard, 1, 8, showScore ? baseIn.summary() : "masque", text_color = baseIn.tColor(bullCol, bearCol), tooltip = scoreTip)
+    table.cell(dashboard, 0, 9, "Base hors session", text_color = color.white)
+    table.cell(dashboard, 1, 9, showScore ? baseOut.summary() : "masque", text_color = baseOut.tColor(bullCol, bearCol), tooltip = scoreTip)
+    table.cell(dashboard, 0, 10, "Tes signaux", text_color = color.white)
+    table.cell(dashboard, 1, 10, showScore ? sigAll.summary() : "masque", text_color = sigAll.tColor(bullCol, bearCol), tooltip = scoreTip)
+    table.cell(dashboard, 0, 11, "Tes longs", text_color = color.white)
+    table.cell(dashboard, 1, 11, showScore ? sigLong.summary() : "masque", text_color = sigLong.tColor(bullCol, bearCol), tooltip = scoreTip)
+    table.cell(dashboard, 0, 12, "Tes shorts", text_color = color.white)
+    table.cell(dashboard, 1, 12, showScore ? sigShort.summary() : "masque", text_color = sigShort.tColor(bullCol, bearCol), tooltip = "Si les longs gagnent et les shorts perdent, c'est surtout la hausse de l'or, pas l'indicateur.")
+    table.cell(dashboard, 0, 13, "Cout par trade", text_color = color.white)
+    table.cell(dashboard, 1, 13, costText, text_color = color.white)
+    table.cell(dashboard, 0, 14, "Moteur", text_color = color.white)
+    table.cell(dashboard, 1, 14, engineMode, text_color = color.white)
+// === VISUALS END ===
+
+// === ALERTS START ===
+alertcondition(turnedBull, title = "Bullish Trend Signal", message = "Range Filter V3.2: LONG | {{exchange}}:{{ticker}} | {{interval}} | close={{close}}")
+alertcondition(turnedBear, title = "Bearish Trend Signal", message = "Range Filter V3.2: SHORT | {{exchange}}:{{ticker}} | {{interval}} | close={{close}}")
+alertcondition(turnedNeut, title = "Neutral State", message = "Range Filter V3.2: NEUTRE | {{exchange}}:{{ticker}} | {{interval}}")
+alertcondition(signalChanged, title = "Any Trend Change", message = "Range Filter V3.2: changement de signal | {{exchange}}:{{ticker}} | {{interval}} | etat={{plot(\"Signal State\")}}")
+
+// Direction alerts do not imply that an entry has been confirmed.
+alertcondition(directionChanged and filterDirection == 1, title = "Filter Direction Up", message = "Range Filter V3.2: filtre en hausse, signal d'entree distinct | {{exchange}}:{{ticker}} | {{interval}}")
+alertcondition(directionChanged and filterDirection == -1, title = "Filter Direction Down", message = "Range Filter V3.2: filtre en baisse, signal d'entree distinct | {{exchange}}:{{ticker}} | {{interval}}")
+alertcondition(directionChanged and filterDirection == 0, title = "Filter Direction Flat", message = "Range Filter V3.2: filtre plat prolonge | {{exchange}}:{{ticker}} | {{interval}}")
