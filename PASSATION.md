@@ -30,8 +30,8 @@
 
 ### Lancer
 ```bash
-# Terminal (puis ouvrir http://localhost:7071)
-~/kronos/.venv/bin/python -I ~/range-filter/terminal/server.py
+# Terminal : lance en arriere-plan et ouvre le navigateur (arret : stop.sh ; journal : terminal/server.log)
+~/range-filter/terminal/start.sh
 # Prévision Kronos dessinée dans TradingView (fichiers kronos-<SYM>-<tf>.pine, ignorés par git)
 cd ~/range-filter && ~/kronos/.venv/bin/python -I kronos_live.py ETH,HYPE,PURR 1h
 ```
