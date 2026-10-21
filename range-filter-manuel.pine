@@ -4,8 +4,11 @@
 // Manual-trading indicator, 2026-10-21: same filter engine as Range Filter Spot V4.
 // BUY at the first up step when no move is open; FIN at the first down step or
 // after a prolonged flat. FIN is information, not an order. No target, no stop:
-// exits are the trader's decision. Each move is drawn as two zones (best gain
-// reached, worst dip). The verdict asks one directional question: after a BUY,
+// exits are the trader's decision. The live bar answers "what now?": ACHAT (buy
+// window open), ACHAT ? (the forming bar closes into a BUY if it holds), EN COURS
+// (too late to enter), FIN ?, PAS D'ACHAT, ATTENTE, with the exact close levels
+// that trigger BUY or FIN. Optional zones show each past move (best gain, worst
+// dip). The verdict asks one directional question: after a BUY,
 // does +x% come before -x% more often than from any bar? (Reaching +x% alone is
 // not evidence: BUYs come in volatile phases, where -x% also comes more often.)
 // This script reads no wallet and places no order.
@@ -14,7 +17,8 @@
 indicator("Range Filter Manuel", overlay = true, max_bars_back = 5000, max_labels_count = 500, max_boxes_count = 500)
 
 const string G_CORE = "1. Filtre"
-const string G_TRADE = "2. Mon trade"
+const string G_ACT = "2. Quand acheter"
+const string G_TRADE = "2b. Mon trade"
 const string G_STATS = "3. Statistiques"
 const string G_VIS = "4. Affichage"
 const string SZ_S = "Petit"
@@ -26,6 +30,12 @@ multIn = input.float(3.0, "Multiplicateur", minval = 0.5, step = 0.25, group = G
 atrLen = input.int(14, "Periode ATR", minval = 2, maxval = 200, group = G_CORE)
 atrFloor = input.float(0.25, "Largeur minimale / ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = G_CORE)
 rangeBars = input.int(20, "Bougies plates = fin du mouvement", minval = 1, maxval = 500, group = G_CORE)
+
+entryBars = input.int(3, "Fenetre d'achat : bougies apres le BUY", minval = 0, maxval = 50, group = G_ACT, tooltip = "ACHAT reste affiche pendant ces bougies apres le BUY (0 = seulement la bougie du BUY). Ensuite : EN COURS, trop tard.")
+lateMaxPct = input.float(1.5, "Trop tard si deja a +x % du BUY", minval = 0.1, step = 0.25, group = G_ACT, tooltip = "Si le prix est deja monte de plus de x % depuis le BUY, la fenetre se ferme.")
+showWindow = input.bool(true, "Fond vert = fenetre d'achat", group = G_ACT)
+showLevels = input.bool(true, "Niveaux de cloture : BUY si > / FIN si <", group = G_ACT, tooltip = "Le BUY (ou la FIN) est confirme si la bougie cloture au-dela de ce niveau. C'est le calcul exact du filtre.")
+alertPreview = input.bool(false, "Alerte aussi quand un BUY se forme (avant la cloture)", group = G_ACT, tooltip = "Previent plus tot, mais le BUY peut disparaitre si le prix redescend avant la cloture.")
 
 walletIn = input.float(0.0, "Wallet (devise de cotation, 0 = masque)", minval = 0.0, group = G_TRADE, tooltip = "Saisi a la main : le script ne lit pas ton wallet.")
 sizePct = input.float(20.0, "% du wallet par trade", minval = 0.1, maxval = 100.0, step = 1.0, group = G_TRADE)
@@ -45,16 +55,17 @@ textSizeIn = input.string(SZ_M, "Taille du texte", options = [SZ_S, SZ_M, SZ_L],
 showCloud = input.bool(false, "Nuage de tendance (entre filtre et prix)", group = G_VIS)
 colorBars = input.bool(false, "Colorer les bougies selon le filtre", group = G_VIS)
 showBands = input.bool(false, "Bande haute et seuil d'inversion", group = G_VIS)
-showZones = input.bool(true, "Zones des mouvements (max atteint / pire baisse)", group = G_VIS, tooltip = "Vert : du prix du BUY au plus haut atteint. Rouge : du prix du BUY au plus bas atteint. Figees a chaque cloture.")
+showZones = input.bool(false, "Zones des mouvements (max atteint / pire baisse)", group = G_VIS, tooltip = "Vert : du prix du BUY au plus haut atteint. Rouge : du prix du BUY au plus bas atteint. Figees a chaque cloture.")
 zonesKept = input.int(30, "Zones : derniers mouvements affiches", minval = 1, maxval = 250, group = G_VIS)
 showLabels = input.bool(true, "Etiquettes BUY / FIN", group = G_VIS)
-showTag = input.bool(true, "Etiquette du trade en cours a droite du prix", group = G_VIS)
-showLive = input.bool(true, "Panneau : situation en cours", group = G_VIS)
-showStats = input.bool(true, "Panneau : ce qu'ont donne les BUY", group = G_VIS)
+showTag = input.bool(true, "Etiquette ACHAT / ATTENTE a droite du prix", group = G_VIS)
+showLive = input.bool(true, "Panneau : que faire maintenant", group = G_VIS)
+showStats = input.bool(false, "Panneau detaille : ce qu'ont donne les BUY", group = G_VIS)
 
 float feeRt = feeRtPct / 100.0
 string szMain = textSizeIn == SZ_S ? size.small : textSizeIn == SZ_L ? size.large : size.normal
 string szMinor = textSizeIn == SZ_S ? size.tiny : textSizeIn == SZ_L ? size.normal : size.small
+string szBig = textSizeIn == SZ_S ? size.normal : textSizeIn == SZ_L ? size.huge : size.large
 // Panel colours follow the chart theme, so text stays readable on light and dark charts.
 color fg = chart.fg_color
 color fgMuted = color.new(chart.fg_color, 45)
@@ -252,31 +263,77 @@ pricePlot = plot(close, "Prix (nuage)", display = display.none, editable = false
 fill(filtPlot, pricePlot, color = showCloud and not na(filt) ? color.new(dirColor, 88) : na, title = "Nuage de tendance")
 plot(showBands ? filt + rangeOnClose : na, "Bande haute", color = color.new(dirColor, 60), style = plot.style_linebr)
 plot(showBands ? filt - rangeOnClose : na, "Seuil d'inversion", color = color.new(dirColor, 45), style = plot.style_linebr)
-plot(inMove and not showZones ? refPrice : na, "Prix du BUY", color = fgMuted, style = plot.style_linebr)
+plot(inMove and not showZones ? refPrice : na, "Prix du BUY", color = fgMuted, linewidth = 1, style = plot.style_linebr)
 barcolor(colorBars ? dirColor : na)
 plot(filterDirection, "Sens du filtre", display = display.data_window)
 plot(rangeOnClose / close * 100.0, "Largeur (% du prix)", display = display.data_window)
 
-// Live tag next to the price; it includes the forming bar, the zones only closed bars.
-var label liveTag = na
+// === WHAT TO DO NOW ===
+// Close levels for the bar being judged. They reproduce the engine step exactly:
+// up step <=> close > buyLevel, down step <=> close < finLevel. On a forming bar the
+// filter state is the last confirmed one; on a closed last bar the levels are for
+// the next bar, with the current width (approximate).
+bool live = not barstate.isconfirmed
+float rwNow = live ? rangeWidth : rangeOnClose
+float prevClose = live ? close[1] : close
+float buyLevel = na(filt) or na(rwNow) ? na : math.max(filt + rwNow, prevClose, lastStepDirection == 1 ? lastStepSource : prevClose)
+float finLevel = na(filt) or na(rwNow) ? na : math.min(filt - rwNow, prevClose, lastStepDirection == -1 ? lastStepSource : prevClose)
+bool previewBuy = live and ready and not inMove and close > buyLevel
+bool previewFin = live and ready and inMove and (close < finLevel or (flatBars + 1 >= rangeBars and close <= buyLevel))
+int sinceBuy = inMove ? bar_index - buyBar : na
+float fromBuy = inMove ? close / refPrice - 1.0 : na
+bool buyWindow = inMove and sinceBuy <= entryBars and fromBuy <= lateMaxPct / 100.0
+
+const int ST_INIT = 0
+const int ST_BUY = 1
+const int ST_BUY_FORMING = 2
+const int ST_IN = 3
+const int ST_FIN_FORMING = 4
+const int ST_DOWN = 5
+const int ST_WAIT = 6
+int state = not ready ? ST_INIT : previewFin ? ST_FIN_FORMING : buyWindow ? ST_BUY : inMove ? ST_IN : previewBuy ? ST_BUY_FORMING : filterDirection == -1 ? ST_DOWN : ST_WAIT
+string stateWord = state == ST_INIT ? "INITIALISATION" : state == ST_BUY ? "ACHAT" : state == ST_BUY_FORMING ? "ACHAT ?" : state == ST_IN ? "EN COURS " + pct(fromBuy, "0.0") : state == ST_FIN_FORMING ? "FIN ?" : state == ST_DOWN ? "PAS D'ACHAT" : "ATTENTE"
+color stateBg = state == ST_BUY ? colUp : state == ST_BUY_FORMING or state == ST_FIN_FORMING ? colAmber : state == ST_IN ? color.new(colUp, 65) : state == ST_DOWN ? colDown : colNeutral
+color stateTxt = state == ST_BUY or state == ST_BUY_FORMING or state == ST_FIN_FORMING ? color.black : color.white
+lvl(float x) =>
+    str.tostring(x, format.mintick) + " (" + pct(x / close - 1.0, "0.0") + ")"
+string stateLine = state == ST_INIT ? "historique trop court" : state == ST_BUY ? "BUY " + str.tostring(refPrice, format.mintick) + (sinceBuy == 0 ? ", a cette cloture" : ", il y a " + str.tostring(sinceBuy) + " b.") + "  |  prix " + pct(fromBuy, "0.0") : state == ST_BUY_FORMING ? "pas confirme : BUY si cloture > " + lvl(buyLevel) : state == ST_IN ? "trop tard pour entrer  |  FIN si cloture < " + lvl(finLevel) : state == ST_FIN_FORMING ? (close < finLevel ? "FIN si cloture < " + lvl(finLevel) : "plat trop long : FIN si pas > " + lvl(buyLevel)) : "BUY si cloture > " + lvl(buyLevel)
+
+bgcolor(showWindow and buyWindow ? color.new(colUp, 84) : showWindow and previewBuy ? color.new(colAmber, 80) : na, title = "Fenetre d'achat")
+
+// Tag and levels live on the last bar only: deleted and redrawn on each update.
+var label stateTag = na
+var line buyLine = na
+var line finLine = na
+var label buyLineLbl = na
+var label finLineLbl = na
 if barstate.islast
-    label.delete(liveTag)
-    liveTag := na
-    if showTag and inMove
-        float nowPct = close / refPrice - 1.0
-        float bestPct = math.max(mfe, high / refPrice - 1.0)
-        float worstPct = math.min(mae, low / refPrice - 1.0)
-        liveTag := label.new(bar_index + 2, close, "Depuis BUY  " + pct(nowPct, "0.00") + "\nmax " + pct(bestPct, "0.0") + "  |  pire " + pct(worstPct, "0.0"), style = label.style_label_left, color = nowPct >= 0 ? colUp : colDown, textcolor = nowPct >= 0 ? color.black : color.white, size = szMain)
+    label.delete(stateTag)
+    line.delete(buyLine)
+    line.delete(finLine)
+    label.delete(buyLineLbl)
+    label.delete(finLineLbl)
+    if showTag
+        stateTag := label.new(bar_index + 2, close, stateWord + "\n" + stateLine, style = label.style_label_left, color = stateBg, textcolor = stateTxt, size = szBig, textalign = text.align_left)
+    if showLevels and ready
+        if not inMove and not na(buyLevel)
+            buyLine := line.new(bar_index - 3, buyLevel, bar_index + 12, buyLevel, color = colUp, style = line.style_dashed, width = 2)
+            buyLineLbl := label.new(bar_index + 12, buyLevel, "BUY si cloture > " + str.tostring(buyLevel, format.mintick), style = label.style_label_left, color = color.new(colUp, 20), textcolor = color.black, size = szMinor)
+        if inMove and not na(finLevel)
+            finLine := line.new(bar_index - 3, finLevel, bar_index + 12, finLevel, color = colDown, style = line.style_dashed, width = 2)
+            finLineLbl := label.new(bar_index + 12, finLevel, "FIN si cloture < " + str.tostring(finLevel, format.mintick), style = label.style_label_left, color = color.new(colDown, 20), textcolor = color.white, size = szMinor)
 
 // === ALERTS ===
 // Create one alert with "Any alert() function call". Signals at bar close, not orders.
 if buySignal
     alert(syminfo.ticker + " " + timeframe.period + " : BUY a " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if alertPreview and previewBuy
+    alert(syminfo.ticker + " " + timeframe.period + " : BUY en formation, confirme si cloture > " + str.tostring(buyLevel, format.mintick), alert.freq_once_per_bar)
 if endSignal
     alert(syminfo.ticker + " " + timeframe.period + " : FIN du mouvement (" + endReason + "), " + pct(moveRes, "0.00") + " depuis le BUY", alert.freq_once_per_bar_close)
 
 // === PANELS ===
-var table liveTable = table.new(position.top_right, 2, 5, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
+var table liveTable = table.new(position.top_right, 2, 6, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
 var table statsTable = table.new(position.bottom_right, 3, 13, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
 
 cell(table t, int c, int r, string s, color col, color bg = na) =>
@@ -302,25 +359,36 @@ zOf(int k) =>
 zColor(float z) =>
     na(z) ? fg : z >= 2.0 ? colUp : z <= -2.0 ? colDown : fg
 
+leftText(int ms) =>
+    int m = int(math.ceil(math.max(ms, 0) / 60000.0))
+    m >= 60 ? str.tostring(int(m / 60)) + " h " + str.format("{0,number,00}", m % 60) : str.tostring(m) + " min"
+
 if barstate.islast and showLive
-    string dirText = not readyOnClose ? "INITIALISATION" : filterDirection == 1 ? "▲ HAUSSE" : filterDirection == -1 ? "▼ BAISSE" : "■ PLAT"
-    color dirText_col = filterDirection == 1 ? color.black : color.white
-    cell(liveTable, 0, 0, "Range Filter", dirText_col, dirColor)
-    cell(liveTable, 1, 0, dirText, dirText_col, dirColor)
-    cell(liveTable, 0, 1, "Mouvement", fgMuted)
-    cell(liveTable, 1, 1, inMove ? "BUY a " + str.tostring(refPrice, format.mintick) + ", il y a " + str.tostring(bar_index - buyBar) + " b." : "aucun", fg)
-    float nowLive = inMove ? close / refPrice - 1.0 : na
-    cell(liveTable, 0, 2, "Actuel / max / pire", fgMuted)
-    cell(liveTable, 1, 2, inMove ? pct(nowLive, "0.00") + "  /  " + pct(math.max(mfe, high / refPrice - 1.0), "0.0") + "  /  " + pct(math.min(mae, low / refPrice - 1.0), "0.0") : "-", inMove ? (nowLive >= 0 ? colUp : colDown) : fg)
+    table.cell(liveTable, 0, 0, stateWord, text_color = stateTxt, bgcolor = stateBg, text_size = szBig, text_halign = text.align_center)
+    table.cell(liveTable, 0, 1, stateLine, text_color = fg, text_size = szMain, text_halign = text.align_center)
+    cell(liveTable, 0, 2, "Cloture de la bougie", fgMuted)
+    cell(liveTable, 1, 2, live and not na(time_close) ? "dans " + leftText(time_close - timenow) : "fermee", fg)
+    if inMove
+        cell(liveTable, 0, 3, "Depuis BUY : actuel / max / pire", fgMuted)
+        cell(liveTable, 1, 3, pct(fromBuy, "0.00") + "  /  " + pct(math.max(mfe, high / refPrice - 1.0), "0.0") + "  /  " + pct(math.min(mae, low / refPrice - 1.0), "0.0"), fromBuy >= 0 ? colUp : colDown)
+    else
+        cell(liveTable, 0, 3, "Filtre", fgMuted)
+        cell(liveTable, 1, 3, filterDirection == -1 ? "▼ baisse" : "■ plat", dirColor)
     if walletIn > 0
         float amount = walletIn * sizePct / 100.0
-        cell(liveTable, 0, 3, "Montant (" + str.tostring(sizePct, "0.#") + " %)", fgMuted)
-        cell(liveTable, 1, 3, str.tostring(amount, "#,##0.00") + " " + syminfo.currency + "  =  " + str.tostring(amount / close, "#,##0.####") + " " + syminfo.basecurrency, fg)
-    cell(liveTable, 0, 4, "Frais AR supposes", fgMuted)
-    cell(liveTable, 1, 4, str.tostring(feeRtPct, "0.00") + " %", fgMuted)
+        cell(liveTable, 0, 4, "Montant (" + str.tostring(sizePct, "0.#") + " %)", fgMuted)
+        cell(liveTable, 1, 4, str.tostring(amount, "#,##0.00") + " " + syminfo.currency + "  =  " + str.tostring(amount / close, "#,##0.####") + " " + syminfo.basecurrency, fg)
+    // Honesty line: does a BUY here beat buying at any bar? (detail in the stats panel)
+    int nB = cN.get(2)
+    float zB = zOf(1)
+    string tB = str.tostring(thr2, "0.#") + " %"
+    cell(liveTable, 0, 5, "Historique : +" + tB + " avant -" + tB, fgMuted)
+    cell(liveTable, 1, 5, nB < 30 or na(zB) ? "pas assez de BUY (" + str.tostring(nB) + ")" : zB >= 2.0 ? "BUY mieux que le hasard" : zB >= 1.0 ? "un peu mieux, pas prouve" : zB > -1.0 ? "BUY = hasard ici" : "BUY moins bien que le hasard", nB < 30 or na(zB) ? fgMuted : zB >= 2.0 ? colUp : zB >= 1.0 ? colAmber : zB > -1.0 ? fg : colDown)
 
 // Merge once: merged cells cannot be merged again.
 if barstate.isfirst
+    liveTable.merge_cells(0, 0, 1, 0)
+    liveTable.merge_cells(0, 1, 1, 1)
     statsTable.merge_cells(0, 0, 2, 0)
     statsTable.merge_cells(0, 1, 2, 1)
     statsTable.merge_cells(0, 6, 2, 6)
