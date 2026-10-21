@@ -5,6 +5,7 @@
 <title>Terminal Range Filter</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/static/kronos-overlay.js"></script>
 <style>
   :root { --bg:#0b0e13; --panel:#11161d; --line:#222a35; --fg:#e6edf3; --muted:#8b949e;
           --up:#00c896; --down:#ff4d6d; --amber:#f0b429; --grey:#5d6470; --violet:#a5b4fc; }
@@ -54,6 +55,23 @@
   .inputs input { background:var(--bg); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 8px; font:inherit; width:100%; }
   .note { font-size:12px; color:var(--muted); }
   .err { color:var(--down); padding:12px; }
+  #kstatus[data-state="loading"] { color:var(--amber); }
+  #kstatus[data-state="error"] { color:var(--down); }
+  #kstatus[data-state="ready"] { color:var(--violet); }
+  #kcard select { width:100%; }
+  #kresearch { border-top:1px solid var(--line); padding-top:8px; }
+  #kresults summary { cursor:pointer; color:var(--violet); }
+  #kresults table, .scores { width:100%; border-collapse:collapse; margin:8px 0; font-size:12px; }
+  .scores th, .scores td { padding:4px 2px; text-align:right; border-bottom:1px solid var(--line); }
+  .scores th:first-child, .scores td:first-child { text-align:left; }
+  #kresults th, #kresults td { padding:5px 3px; text-align:right; border-bottom:1px solid var(--line); }
+  #kresults th:first-child, #kresults td:first-child { text-align:left; }
+  @media (max-width:1100px) { main { grid-template-columns:210px 1fr 300px; } header { gap:8px; } .src { max-width:180px; } }
+  @media (max-width:800px) {
+    body { height:auto; min-height:100vh; grid-template-rows:auto 1fr; }
+    header { flex-wrap:wrap; padding:10px; } main { grid-template-columns:1fr; }
+    aside { max-height:180px; } #chartwrap { height:440px; } section.panel { overflow:visible; }
+  }
 </style>
 </head>
 <body>
@@ -65,7 +83,7 @@
     <option value="hl_perp">Hyperliquid perp</option>
     <option value="auto">Binance (auto)</option>
   </select>
-  <button class="toggle" id="kbtn" title="50 futurs imagines par Kronos (image, pas un signal)">Futurs Kronos</button>
+  <button class="toggle" id="kbtn" aria-pressed="false" title="50 scénarios sur les 12 prochaines bougies">Futurs Kronos</button>
   <div class="spacer"></div>
   <div class="src" id="src"></div>
 </header>
@@ -84,7 +102,25 @@
     <div class="card">
       <h3>Fourchette probable</h3>
       <div class="kv" id="range"></div>
-      <div class="note">Methode simple, testee sur 2026 : le prix depasse le haut environ 1 fois sur 10, et le bas aussi.</div>
+      <div class="note">Méthode simple. Tests historiques en 1h/4h : environ 1 dépassement sur 10 de chaque côté. Ce taux n'est pas garanti en direct.</div>
+    </div>
+    <div class="card" id="kcard">
+      <h3>Scénarios Kronos</h3>
+      <label class="note" for="kmodel">Modèle à comparer</label>
+      <select id="kmodel"><option value="original">Kronos original</option></select>
+      <div id="kstatus" class="note" role="status" aria-live="polite">Scénarios désactivés.</div>
+      <div id="kmeta" class="note"></div>
+      <div id="knote" class="note">Les courbes représentent des scénarios générés. Leur moyenne n'est pas un objectif de prix.</div>
+      <div id="kresearch" class="note"></div>
+      <details id="kresults" class="note" hidden><summary>Résultats mesurés</summary><div id="kscores"></div></details>
+    </div>
+    <div class="card" id="collection-card">
+      <h3>Collecte & validation</h3>
+      <div id="collection-state" class="note" role="status" aria-live="polite">Connexion à la collecte…</div>
+      <div id="collection-counts" class="note"></div>
+      <div id="collection-next" class="note"></div>
+      <details class="note"><summary>Données et prévisions enregistrées</summary><div id="collection-details"></div></details>
+      <div class="note">BTC · ETH · HYPE · ZEC, spot Hyperliquid, 1h/4h. La collecte continue tant que le serveur et la WSL fonctionnent. Pas de réentraînement automatique.</div>
     </div>
     <div class="card">
       <h3>Montant</h3>
@@ -94,7 +130,6 @@
       </div>
       <div class="kv" id="amount"></div>
     </div>
-    <div class="note" id="knote" style="display:none">Futurs Kronos : 50 scenarios imagines. Teste sur 2026 : direction 50/50, fourchette trop etroite. A regarder, pas a suivre.</div>
     <div class="note">Donnees publiques (Binance, Bybit, Hyperliquid). Aucun compte, aucune cle, aucun ordre. Les decisions sont les tiennes.</div>
   </section>
 </main>
@@ -109,9 +144,10 @@ const S = {
   src: localStorage.src || 'hl_spot',
   syms: JSON.parse(localStorage.syms || '["BTC","ETH","HYPE","ZEC","SOL"]'),
   sel: localStorage.sel || 'ETH',
-  kronos: false, data: null, lines: [], kSeries: [], kKey: null,
+  kronos: false, data: null, lines: [], kSeries: [], kModel: localStorage.kModel || 'original', models: [],
 };
 const $ = id => document.getElementById(id);
+const esc = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const fmt = x => x == null ? '-' : x >= 1000 ? x.toLocaleString('fr-FR', {maximumFractionDigits:2}) : x >= 1 ? x.toFixed(4).replace(/0+$/,'').replace(/\.$/,'') : x.toPrecision(5);
 const pct = x => x == null ? '-' : (x >= 0 ? '+' : '') + (100 * x).toFixed(2) + ' %';
 const save = () => { localStorage.src = S.src; localStorage.tf = S.tf; localStorage.syms = JSON.stringify(S.syms); localStorage.sel = S.sel; };
@@ -153,7 +189,7 @@ function drawChart(d, reset) {
     bot_.setData(ts.map(time => ({ time, value: d.range.bot })));
   } else { top_.setData([]); bot_.setData([]); }
   if (reset) chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 160, to: d.candles.length + 28 });
-  $('legend').innerHTML = `<b>${d.sym}</b>${S.tf} &middot; ${fmt(d.price)}`;
+  $('legend').innerHTML = `<b>${esc(d.sym)}</b>${S.tf} &middot; ${fmt(d.price)}`;
   $('src').textContent = 'Source : ' + d.src;
 }
 
@@ -181,7 +217,7 @@ function drawAmount() {
   if (!d || !w) { $('amount').innerHTML = '<div class="k">Saisis ton wallet</div><div></div>'; return; }
   const a = w * p / 100;
   $('amount').innerHTML = `<div class="k">Montant</div><div class="v">${a.toLocaleString('fr-FR', {maximumFractionDigits:2})} USDT</div>
-    <div class="k">Quantite</div><div class="v">${(a / d.price).toPrecision(6)} ${d.sym}</div>`;
+    <div class="k">Quantite</div><div class="v">${(a / d.price).toPrecision(6)} ${esc(d.sym)}</div>`;
 }
 
 function tick() {
@@ -192,12 +228,7 @@ function tick() {
 }
 
 // --- kronos paths ---
-async function drawKronos() {
-  S.kSeries.forEach(s => chart.removeSeries(s)); S.kSeries = [];
-  if (!S.kronos) return;
-  const r = await fetch(`/api/kronos?sym=${encodeURIComponent(S.sel)}&tf=${S.tf}&src=${S.src}`);
-  if (!r.ok || !S.kronos) return;
-  const k = await r.json();
+function renderKronos(k) {
   const mean = k.times.map((t, i) => k.paths.reduce((s, p) => s + p[i], 0) / k.paths.length);
   for (const p of k.paths) {
     const s = chart.addLineSeries({ color: 'rgba(165,180,252,0.13)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
@@ -207,7 +238,100 @@ async function drawKronos() {
   const m = chart.addLineSeries({ color: C.violet, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: 'moyenne Kronos', crosshairMarkerVisible: false });
   m.setData([{ time: k.start.time + TZ, value: k.start.value }, ...k.times.map((t, i) => ({ time: t + TZ, value: mean[i] }))]);
   S.kSeries.push(m);
-  S.kKey = S.sel + S.tf + k.start.time;
+}
+
+const overlay = new KronosOverlay({
+  request: async ({sym, tf, src, model}, signal) => {
+    const response = await fetch('/api/kronos?' + new URLSearchParams({sym, tf, src, model}), {signal});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Prévision indisponible.');
+    return data;
+  },
+  clear: () => { S.kSeries.forEach(s => chart.removeSeries(s)); S.kSeries = []; },
+  render: renderKronos,
+  status: (state, message) => { $('kstatus').dataset.state = state; $('kstatus').textContent = message; },
+});
+
+function updateKronos() {
+  const d = S.data;
+  if (!S.kronos) return overlay.sync(null);
+  if (!d || d.sym !== S.sel || d.tf !== S.tf || d.source !== S.src) return;
+  const bar = d.candles[d.candles.length - (d.live ? 2 : 1)].time;
+  return overlay.sync({sym:S.sel, tf:S.tf, src:S.src, market:d.src, model:S.kModel, bar});
+}
+
+function resetMarket() {
+  S.data = null;
+  overlay.reset();
+  $('kstatus').textContent = S.kronos ? 'Chargement des bougies…' : 'Scénarios désactivés.';
+  save(); loadChart(true); loadList();
+}
+
+function modelNote() {
+  $('kmeta').textContent = S.models.find(m => m.id === S.kModel)?.note || '';
+}
+
+function researchResults(report) {
+  S.report = report;
+  $('kresearch').textContent = report ? report.summary : 'V2 : expérience avec volumes en préparation.';
+  const results = report?.status === 'complete' && report.diagnostic;
+  $('kresults').hidden = !results;
+  if (!results) return;
+  if (!results.simple?.[S.tf]) {
+    $('kscores').textContent = 'Cette expérience porte sur les unités 1h et 4h. Aucun résultat mesuré sur cette unité.';
+    return;
+  }
+  const names = {simple:'Méthode simple', original:'Kronos original', 'original-volume':'Original + volumes', 'crypto-v1':'Crypto V1', 'crypto-v2':'Crypto V2'};
+  const rows = Object.entries(names).map(([key, label]) => {
+    const score = results[key]?.[S.tf];
+    if (!score) return '';
+    return `<tr><td>${label}</td><td>${score.range_error.toFixed(1)}</td><td>${score.direction_pct == null ? '—' : score.direction_pct.toFixed(1) + ' %'}</td></tr>`;
+  }).join('');
+  $('kscores').innerHTML = `<table><thead><tr><th>Modèle</th><th>Erreur ↓</th><th>Direction</th></tr></thead><tbody>${rows}</tbody></table>
+    <div>${results.simple[S.tf].n} départs cumulés sur BTC, ETH, HYPE et ZEC en ${S.tf}, horizon 12 bougies. L’erreur mesure la fourchette : plus bas est meilleur.</div>
+    <p>Diagnostic exploratoire sur 2026, période déjà examinée. Ces chiffres ne prouvent pas un avantage en direct.</p>`;
+}
+
+async function loadModels() {
+  try {
+    const response = await fetch('/api/kronos/models');
+    if (!response.ok) throw new Error();
+    const data = await response.json();
+    S.models = data.models;
+    if (!data.models.some(m => m.id === S.kModel && m.available)) S.kModel = 'original';
+    $('kmodel').replaceChildren(...data.models.map(m => {
+      const option = new Option(m.label + (m.available ? '' : ' · indisponible'), m.id);
+      option.disabled = !m.available;
+      return option;
+    }));
+    $('kmodel').value = S.kModel;
+    modelNote();
+    researchResults(data.experiment);
+  } catch { $('kresearch').textContent = 'Résultats de l’expérience indisponibles.'; }
+}
+
+async function loadCollection() {
+  try {
+    const response = await fetch('/api/collection');
+    if (!response.ok) throw new Error();
+    const d = await response.json(), f = d.forecasts;
+    const issues = d.streams.filter(s => s.error || !s.fresh);
+    $('collection-state').textContent = (d.running ? 'Active · ' : 'Arrêtée · ') + d.phase +
+      (issues.length ? ` · ${issues.length} historique(s) à vérifier` : '');
+    $('collection-counts').textContent = `${d.candles.toLocaleString('fr-FR')} bougies · ${f.recorded} comparaisons Original/V2 enregistrées · ${f.evaluated} évaluées`;
+    $('collection-next').textContent = f.pending ? `${f.pending} en attente. ` +
+      (f.overdue ? `${f.overdue} à échéance, observations encore incomplètes.` :
+        `Première échéance : ${new Date(f.next_end_ms).toLocaleString('fr-FR')}.`) : 'Les nouvelles prévisions attendent des données complètes.';
+    const rows = d.streams.map(s => `<tr><td>${esc(s.sym)} ${esc(s.tf)}</td><td>${s.count.toLocaleString('fr-FR')}</td><td>${s.fresh ? 'À jour' : 'En attente'}</td></tr>`).join('');
+    const notes = d.streams.filter(s => s.error || s.forecast_error || s.missing).map(s =>
+      `<p>${esc(s.sym)} ${esc(s.tf)} : ${esc(s.error || s.forecast_error || `${s.missing} bougie(s) absente(s) dans l’historique`)}</p>`).join('');
+    const scores = d.scores.length ? '<p>Erreur à la clôture finale, en points de base (plus bas = meilleur). Référence : prix inchangé.</p>' +
+      '<table class="scores"><thead><tr><th>Modèle</th><th>Erreur</th><th>Réf.</th><th>N</th></tr></thead><tbody>' + d.scores.map(s =>
+        `<tr title="Poids ${esc(s.revision)}"><td>${esc(s.model === 'original' ? 'Original' : 'V2')} ${esc(s.tf)}</td><td>${s.error_bps.toFixed(1)}</td><td>${s.unchanged_bps.toFixed(1)}</td><td>${s.n}</td></tr>`).join('') + '</tbody></table>' :
+      '<p>Résultats à venir : 12 clôtures futures par comparaison, soit jusqu’à 12 h en 1h et 48 h en 4h.</p>';
+    $('collection-details').innerHTML = '<table class="scores"><thead><tr><th>Marché</th><th>Bougies</th><th>État</th></tr></thead><tbody>' + rows + '</tbody></table>' + notes + scores +
+      '<p>Prévisions figées avant la première clôture cible. Aucun résultat historique ajouté après coup. Les comparaisons de différentes cryptos ou unités peuvent être corrélées.</p>';
+  } catch { $('collection-state').textContent = 'État de la collecte indisponible.'; }
 }
 
 // --- data loops ---
@@ -217,26 +341,27 @@ async function loadChart(reset = false) {
     const r = await fetch(`/api/chart?sym=${encodeURIComponent(sym)}&tf=${tf}&src=${S.src}`);
     const d = await r.json();
     if (sym !== S.sel || tf !== S.tf || src !== S.src) return;
-    if (d.error) { $('state').innerHTML = `<div class="err">${d.error}</div>`; return; }
+    if (d.error) { $('state').textContent = d.error; return; }
     S.data = d; drawChart(d, reset); drawPanel(d);
-    const lastClosed = d.candles[d.candles.length - (d.live ? 2 : 1)].time;
-    if (S.kronos && S.kKey !== S.sel + S.tf + lastClosed) drawKronos();
+    updateKronos();
   } catch (e) { $('src').textContent = 'Serveur injoignable'; }
 }
 
 async function loadList() {
+  const tf = S.tf, src = S.src;
   try {
     const r = await fetch(`/api/watch?tf=${S.tf}&src=${S.src}&syms=${encodeURIComponent(S.syms.join(','))}`);
     const rows = await r.json();
+    if (tf !== S.tf || src !== S.src || !Array.isArray(rows)) return;
     $('list').innerHTML = rows.map(w => {
-      if (w.error) return `<div class="row" data-s="${w.sym}"><div class="sym">${w.sym}</div><div class="sub" style="grid-column:1/3;color:var(--down)">introuvable</div><span class="x" data-x="${w.sym}">✕</span></div>`;
+      if (w.error) return `<div class="row" data-s="${esc(w.sym)}"><div class="sym">${esc(w.sym)}</div><div class="sub" style="grid-column:1/3;color:var(--down)">introuvable</div><span class="x" data-x="${esc(w.sym)}">✕</span></div>`;
       const [bg, fg] = STYLE[w.code] || STYLE.WAIT;
-      return `<div class="row ${w.sym === S.sel ? 'sel' : ''}" data-s="${w.sym}">
-        <div class="sym">${w.sym} <span class="badge" style="background:${bg};color:${fg}">${w.word}</span></div>
+      return `<div class="row ${w.sym === S.sel ? 'sel' : ''}" data-s="${esc(w.sym)}">
+        <div class="sym">${esc(w.sym)} <span class="badge" style="background:${bg};color:${fg}">${w.word}</span></div>
         <div class="px">${fmt(w.price)}</div>
         <div class="sub">${w.regime == null ? '' : w.regime ? '<span style="color:var(--up)">▲ fond</span>' : '<span style="color:var(--down)">▼ fond</span>'} &nbsp; ecart ${w.width == null ? '-' : (100 * w.width).toFixed(1) + ' %'}</div>
         <div class="sub" style="text-align:right;color:${(w.chg24 || 0) >= 0 ? C.up : C.down}">${pct(w.chg24)} 24h</div>
-        <span class="x" data-x="${w.sym}">✕</span></div>`;
+        <span class="x" data-x="${esc(w.sym)}">✕</span></div>`;
     }).join('');
   } catch (e) {}
 }
@@ -245,26 +370,31 @@ $('list').addEventListener('click', e => {
   const x = e.target.dataset.x;
   if (x) { S.syms = S.syms.filter(s => s !== x); save(); loadList(); return; }
   const row = e.target.closest('.row'); if (!row) return;
-  S.sel = row.dataset.s; save(); S.kKey = null; drawKronos(); loadChart(true); loadList();
+  S.sel = row.dataset.s; resetMarket();
 });
 function addSym() {
   let s = $('addin').value.trim(); if (!s) return;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,19}$/.test(s)) { $('addin').setCustomValidity('Symbole invalide'); $('addin').reportValidity(); return; }
+  $('addin').setCustomValidity('');
   if (!/[a-z]/.test(s.slice(1))) s = s.toUpperCase();  // keep Hyperliquid names like kPEPE
   if (!S.syms.includes(s)) S.syms.push(s);
-  S.sel = s; $('addin').value = ''; save(); S.kKey = null; drawKronos(); loadChart(true); loadList();
+  S.sel = s; $('addin').value = ''; resetMarket();
 }
 $('addbtn').onclick = addSym; $('addin').onkeydown = e => e.key === 'Enter' && addSym();
 $('tfs').innerHTML = ['15m', '1h', '4h', '1d'].map(t => `<button data-t="${t}" class="${t === S.tf ? 'on' : ''}">${t}</button>`).join('');
 $('tfs').onclick = e => { const t = e.target.dataset.t; if (!t) return; S.tf = t; save();
-  [...$('tfs').children].forEach(b => b.classList.toggle('on', b.dataset.t === t)); S.kKey = null; drawKronos(); loadChart(true); loadList(); };
+  [...$('tfs').children].forEach(b => b.classList.toggle('on', b.dataset.t === t)); researchResults(S.report); resetMarket(); };
 $('srcsel').value = S.src;
-$('srcsel').onchange = e => { S.src = e.target.value; save(); S.kKey = null; drawKronos(); loadChart(true); loadList(); };
-$('kbtn').onclick = () => { S.kronos = !S.kronos; $('kbtn').classList.toggle('on', S.kronos); $('knote').style.display = S.kronos ? '' : 'none'; S.kKey = null; drawKronos(); };
+$('srcsel').onchange = e => { S.src = e.target.value; resetMarket(); };
+$('kmodel').onchange = e => { S.kModel = e.target.value; localStorage.kModel = S.kModel; modelNote(); updateKronos(); };
+$('kbtn').onclick = () => { S.kronos = !S.kronos; $('kbtn').classList.toggle('on', S.kronos); $('kbtn').setAttribute('aria-pressed', S.kronos); updateKronos(); };
 $('wallet').value = localStorage.wallet || ''; $('pct').value = localStorage.pct || 20;
 $('wallet').oninput = drawAmount; $('pct').oninput = drawAmount;
 
-loadChart(true); loadList();
+loadChart(true); loadList(); loadModels(); loadCollection();
 setInterval(loadChart, 4000); setInterval(loadList, 15000); setInterval(tick, 1000);
+setInterval(loadModels, 60000);
+setInterval(loadCollection, 15000);
 </script>
 </body>
 </html>

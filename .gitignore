@@ -6,3 +6,6 @@ kronos-*.pine
 backtest/kronos_cache_ft/
 backtest/kronos_range*.csv
 terminal/server.log
+backtest/data_ohlcv/
+backtest/experiments/
+terminal/data/

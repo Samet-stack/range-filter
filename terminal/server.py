@@ -2,18 +2,19 @@
 daily trend switch, simple probable range, optional Kronos paths. Reads public market data only:
 no account, no key, no order.
 Run: ~/kronos/.venv/bin/python -I ~/range-filter/terminal/server.py   then open http://localhost:7071"""
-import json, sys, threading, time, urllib.request
+import json, re, sys, threading, time, urllib.request
 from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import engine
+from kronos_service import KronosService, catalog
+from collection import Collector
 
 MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 HIST = 1500  # candles kept per chart (filter warm-up is 300)
 app = Flask(__name__, static_folder=str(HERE / "static"))
 lock = threading.Lock()
-gpu = threading.Lock()  # Kronos runs one batch at a time, without blocking the candle cache
 cache = {}   # (sym, tf) -> dict(rows, src, full_at, tick_at)
 
 
@@ -31,7 +32,7 @@ def binance(sym, tf, n):
         k = get(url + (f"&endTime={end}" if end else ""))
         if not k:
             break
-        rows = [(r[0], *map(float, r[1:5])) for r in k] + rows
+        rows = [(r[0], *map(float, r[1:6]), float(r[7])) for r in k] + rows
         end = k[0][0] - 1
         if len(k) < 1000:
             break
@@ -47,7 +48,7 @@ def bybit(sym, tf, n):
         if not k:
             break
         for r in k:
-            rows[int(r[0])] = (int(r[0]), *map(float, r[1:5]))
+            rows[int(r[0])] = (int(r[0]), *map(float, r[1:7]))
         end = min(int(r[0]) for r in k) - 1
         if len(k) < 1000:
             break
@@ -58,7 +59,9 @@ def hyperliquid(sym, tf, n):
     now = int(time.time() * 1000)
     k = get("https://api.hyperliquid.xyz/info", {"type": "candleSnapshot", "req": {
         "coin": sym, "interval": tf, "startTime": now - (n + 2) * MS[tf], "endTime": now}})
-    return [(int(r["t"]), float(r["o"]), float(r["h"]), float(r["l"]), float(r["c"])) for r in k]
+    # Hyperliquid supplies base volume, not quote turnover. Use the same OHLC mean estimate as Kronos.
+    return [(int(r["t"]), *[float(r[x]) for x in ("o", "h", "l", "c")], float(r["v"]),
+             float(r["v"]) * sum(float(r[x]) for x in ("o", "h", "l", "c")) / 4) for r in k]
 
 
 spot_meta = {"at": 0, "names": {}}
@@ -155,6 +158,18 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.before_request
+def validate_query():
+    if request.path not in ("/api/chart", "/api/watch", "/api/kronos"):
+        return
+    if request.args.get("tf", "1h") not in MS or request.args.get("src", "hl_spot") not in ("hl_spot", "hl_perp", "auto"):
+        return jsonify(error="Unité de temps ou source inconnue."), 400
+    syms = ([s for s in request.args.get("syms", "").split(",") if s.strip()]
+            if request.path == "/api/watch" else [request.args.get("sym", "")])
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,19}", s.strip()) for s in syms):
+        return jsonify(error="Symbole invalide."), 400
+
+
 @app.get("/api/watch")
 def watch():
     tf, source = request.args.get("tf", "1h"), request.args.get("src", "hl_spot")
@@ -188,7 +203,7 @@ def chart():
     ev = [dict(e, time=e["t"] // 1000) for e in rf["events"] if e["t"] >= first_t]
     t_form = live[0] if live else closed[-1][0] + MS[tf]
     return jsonify(
-        sym=sym, tf=tf, src=c["src"],
+        sym=sym, tf=tf, src=c["src"], source=source,
         candles=[dict(time=r[0] // 1000, open=r[1], high=r[2], low=r[3], close=r[4]) for r in rows],
         filt=filt, events=ev, code=code, word=word, detail=detail, price=rf["price"],
         in_move=rf["in_move"], ref=rf["ref"], mfe=rf["mfe"], mae=rf["mae"], since_buy=rf["since_buy"],
@@ -197,40 +212,43 @@ def chart():
         regime=reg, range=dict(rng, t0=t_form // 1000, t1=(t_form + (rng["hz"] - 1) * MS[tf]) // 1000) if rng else None)
 
 
-kronos = {"pred": None, "cache": {}}
+kronos = KronosService()
+collector = None
+
+
+@app.get("/api/collection")
+def collection_status():
+    if collector is None:
+        return jsonify(running=False, phase="Collecte non démarrée", streams=[], candles=0,
+                       forecasts=dict(recorded=0, evaluated=0, pending=0, overdue=0, next_end_ms=None), scores=[])
+    return jsonify(collector.status())
+
+
+@app.get("/api/kronos/models")
+def kronos_models():
+    return jsonify(catalog())
 
 
 @app.get("/api/kronos")
 def kronos_paths():
     sym, tf, source = request.args["sym"], request.args.get("tf", "1h"), request.args.get("src", "hl_spot")
-    paths_n, hz = 50, 24
-    c = candles(sym, tf, source=source)
-    closed, live = split(c["rows"], tf)
-    key = (sym, tf, c["src"], closed[-1][0])
-    if key in kronos["cache"]:
-        return jsonify(kronos["cache"][key])
-    sys.path.insert(0, str(Path.home() / "kronos"))
-    import pandas as pd, torch
-    from model import Kronos, KronosTokenizer, KronosPredictor
-    if kronos["pred"] is None:
-        kronos["pred"] = KronosPredictor(Kronos.from_pretrained("NeoQuasar/Kronos-small"),
-                                         KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base"),
-                                         device="cuda:0" if torch.cuda.is_available() else "cpu", max_context=512)
-    ctx = closed[-400:]
-    df = pd.DataFrame([r[1:5] for r in ctx], columns=["open", "high", "low", "close"])
-    xts = pd.Series(pd.to_datetime([r[0] for r in ctx], unit="ms"))
-    t0 = ctx[-1][0]
-    fut = [t0 + MS[tf] * i for i in range(1, hz + 1)]
-    yts = pd.Series(pd.to_datetime(fut, unit="ms"))
-    with gpu:
-        ps = kronos["pred"].predict_batch([df] * paths_n, [xts] * paths_n, [yts] * paths_n, pred_len=hz,
-                                          T=1.0, top_p=0.9, sample_count=1, verbose=False)
-    last = ctx[-1][4]
-    out = dict(start=dict(time=t0 // 1000, value=last), times=[t // 1000 for t in fut],
-               paths=[p["close"].round(10).tolist() for p in ps])
-    kronos["cache"][key] = out
-    return jsonify(out)
+    try:
+        c = candles(sym, tf, source=source)
+        closed, _ = split(c["rows"], tf)
+        result = kronos.forecast(sym, tf, c["src"], closed, MS[tf], request.args.get("model", "original"))
+        return jsonify(dict(result, source=source))
+    except BlockingIOError as exc:
+        return jsonify(error=str(exc)), 503, {"Retry-After": "15"}
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except LookupError as exc:
+        return jsonify(error=str(exc)), 404
+    except Exception:
+        app.logger.exception("Kronos prediction failed")
+        return jsonify(error="Le calcul Kronos a échoué. Tu peux réessayer."), 500
 
 
 if __name__ == "__main__":
+    collector = Collector(get, hl_spot_coin, kronos)
+    collector.start()
     app.run(host="127.0.0.1", port=7071, debug=False, threaded=True)

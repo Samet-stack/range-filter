@@ -14,7 +14,7 @@
   - **ne jamais pousser sur GitLab sans sa validation**.
 
 ## État du dépôt `~/range-filter` (branche `main`)
-- 15 commits locaux en avance sur `origin/main` (GitLab `samet.reyhan/range-filter`). **Rien n'est poussé.**
+- 18 commits locaux en avance sur `origin/main` au 21 octobre 2026, plus les améliorations locales du terminal/Kronos vérifiées et non commitées (GitLab `samet.reyhan/range-filter`). **Rien n'est poussé.**
   - Pour pousser, il faut l'accord de Samet, plus un nouveau jeton ou une clé SSH.
   - Un jeton d'accès (PAT) collé dans un ancien chat **doit être révoqué** par Samet. Il n'est stocké nulle part.
 - Commits signés `samet.reyhan <samet.reyhan@functori.com>` via `git -c user.name=... -c user.email=...`. Ne pas modifier la configuration git globale.
@@ -43,7 +43,7 @@ Méthode commune à tous les tests :
 - **Test « +x % avant −x % »**, partant de la clôture d'un BUY, comparé à une bougie sur 5.
 - **Écart en z** (test de deux proportions). Le test a été calibré sur des marches aléatoires.
 - **Frais** de 0,10 à 0,27 % par côté.
-- Période **2026 = hors échantillon** pour Kronos.
+- Période **2026 hors apprentissage** pour les essais décrits ; déjà examinée, elle ne constitue plus un test aveugle pour choisir de nouveaux réglages.
 
 1. **Range Filter (15m à 4h) : aucun avantage directionnel.** Après un BUY, le prix fait +x % avant −x % aussi souvent que depuis n'importe quelle bougie, sur BTC, ETH, ZEC et HYPE, en 1h et en 4h. Les gains en 4h sur ZEC et HYPE viennent de la tendance du marché, et garder sans rien faire faisait mieux. Voir `AUDIT-2026-10-20.md` et `backtest/up_before_down.py`.
 2. **Le Range Filter ne réduit pas la pire chute** en 1h et 4h. Il fait des allers-retours dans les phases plates.
@@ -66,7 +66,7 @@ Méthode commune à tous les tests :
 5. **Le post X « REA + Kronos = terminal Bloomberg »** (@carm1nee) promet exactement ce qui a été testé ici, et ça échoue. Le seul bon conseil du post est « backtest avant de faire confiance ».
 
 ## Autres éléments sur le PC
-- `~/kronos` : clone de `shiyu-coder/Kronos` (licence MIT). Le code a été audité : pas de pickle, pas d'envoi réseau, poids au format safetensors.
+- `~/kronos` : clone de `shiyu-coder/Kronos` (licence MIT). Les poids locaux utilisés ici sont au format safetensors. Les données de marché et le chargement initial des modèles utilisent le réseau ; ne pas généraliser l'ancienne note d'audit à tout le dépôt (les exemples Qlib officiels utilisent notamment des fichiers pickle).
   - L'interface web d'origine (`webui`) écoutait sur `0.0.0.0` avec le mode debug actif. Si on la relance : `host=127.0.0.1`, `debug=False`.
 - `~/rea` : clone de `morluto/rea`, « Reverse Engineer Anything » (MIT, officiel).
   - **Téléchargé seulement, rien n'a été exécuté ni installé** : Samet craint un virus.
@@ -74,6 +74,8 @@ Méthode commune à tous les tests :
   - Ne pas lancer `npx rea-agents setup` sans son accord : ça modifie la configuration des agents, et le paquet npm peut différer du code lu. Si on l'installe un jour : le construire depuis le code source lu, dans un environnement isolé.
 
 ## Reste à faire et idées
+- **Collecte autorisée et activée le 21 octobre 2026** : le serveur archive BTC/ETH/HYPE/ZEC en spot Hyperliquid, 1h/4h, dans `terminal/data/hyperliquid.sqlite3` (ignoré par Git). Premier relevé : **32 703 bougies**, huit séries sans trous internes ; huit comparaisons Original/V2 figées avant leurs clôtures cibles. Collecte chaque minute tant que serveur/WSL tournent, reprise vérifiée après redémarrage. Carte « Collecte & validation » sur localhost et export CSV documenté dans `docs/kronos-local.md`. Aucun réentraînement automatique. Premières évaluations attendues le 22 octobre à 07:00 Paris (1h), le 23 à 18:00 (4h) ; aucun résultat réel de ce suivi encore disponible à la mise en place.
+- **Reprise Codex du 21 octobre 2026 autorisée par Samet** : terminal corrigé (requêtes dédupliquées, réponses obsolètes rejetées), horizon commun 12 bougies, choix original/V1/V2, tableau de résultats. V2 entraîné avec volumes sur BTC/ETH/HYPE/ZEC ; époque 1 retenue après trois époques. Sur le diagnostic pilote de 96 départs, erreurs V2 1h/4h = 142,2/227,4 contre 106,6/219,4 pour la méthode simple ; pas d'avantage directionnel établi. Poids et rapport dans `backtest/experiments/crypto-volume-v2/`. Lire `docs/kronos-local.md` pour les commandes et limites. Les résultats 2026 réutilisés ne sont pas un test indépendant.
 - Faire valider par Samet le rendu du terminal et de l'indicateur Pine. Je ne peux pas compiler le Pine ici : il le colle dans TradingView et renvoie les erreurs.
 - Proposé, pas encore demandé :
   - alertes Telegram du terminal : Samet crée le bot avec @BotFather, le jeton reste dans un fichier local, jamais dans le chat ;

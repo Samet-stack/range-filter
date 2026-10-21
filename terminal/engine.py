@@ -7,9 +7,11 @@ from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backtest"))
 from rf_bt import ema, rma  # Pine-exact ta.ema (SMA seed) and ta.rma
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from kronos_runtime import HORIZON
 
 DEFAULTS = dict(period=100, mult=3.0, atr_len=14, atr_floor=0.25, range_bars=20,
-                late_max=0.015, fee_rt=0.002, regime_len=50, range_h=12)
+                late_max=0.015, fee_rt=0.002, regime_len=50, range_h=HORIZON)
 
 
 def range_filter(bars, live=None, p=DEFAULTS):

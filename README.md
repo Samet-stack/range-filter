@@ -10,4 +10,6 @@ Dérivé de *Range Filter Trend* [QuantAlgo], © QuantAlgo, sous licence
 | `range-filter-spot-v4.pine` | Stratégie `strategy()` spot long uniquement (Hyperliquid : ETH, BTC, HYPE, ZEC), version Témoin V3.1 incluse |
 | `range-filter-spot-v4-notes.md` | Diagnostic, coûts Hyperliquid datés, procédure de test, limites |
 
-Non compilé hors TradingView, aucun résultat de backtest publié. Positions simulées : aucun ordre n'est passé.
+Le Pine n'est pas compilé hors TradingView. Les audits et résultats locaux sont décrits dans [PASSATION.md](PASSATION.md). Aucun ordre n'est passé.
+
+Le terminal local se lance avec `./terminal/start.sh`, puis s'utilise sur http://localhost:7071. Les modèles Kronos, les vérifications et l'expérience de réentraînement sont documentés dans [docs/kronos-local.md](docs/kronos-local.md).
