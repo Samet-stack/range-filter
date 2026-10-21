@@ -14,8 +14,10 @@
   - **ne jamais pousser sur GitLab sans sa validation**.
 
 ## État du dépôt `~/range-filter` (branche `main`)
-- 18 commits locaux en avance sur `origin/main` au 21 octobre 2026, plus les améliorations locales du terminal/Kronos vérifiées et non commitées (GitLab `samet.reyhan/range-filter`). **Rien n'est poussé.**
-  - Pour pousser, il faut l'accord de Samet, plus un nouveau jeton ou une clé SSH.
+- **Publication autorisée explicitement par Samet le 21 octobre 2026**, y compris le passage en public. Les 18 commits précédemment locaux et le commit `f27b0ce` (terminal, V2, collecte et tests) ont été poussés sur `origin/main`, dépôt [samet.reyhan/range-filter](https://gitlab.com/samet.reyhan/range-filter).
+  - Accès Git vérifié via le gestionnaire d'identifiants de **Git Windows**, sans enregistrer de secret dans le dépôt ni modifier la configuration globale. Commande : `git -c "credential.helper=!'/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe'" push origin main`.
+  - **Passage en public encore bloqué** : l'accès existant permet le push, mais l'API de modification du projet répond `403 insufficient_scope`. Samet peut changer `Settings > General > Visibility, project features, permissions > Project visibility > Public`, puis enregistrer. Ne pas déclarer le dépôt public avant une vérification sans authentification.
+  - Avant publication : 28 tests réussis, diff relu, recherche de secrets sans résultat dans les 55 versions de fichiers de l'historique et les 44 fichiers de travail. Les données, poids, caches et journaux restent ignorés et locaux.
   - Un jeton d'accès (PAT) collé dans un ancien chat **doit être révoqué** par Samet. Il n'est stocké nulle part.
 - Commits signés `samet.reyhan <samet.reyhan@functori.com>` via `git -c user.name=... -c user.email=...`. Ne pas modifier la configuration git globale.
 
@@ -81,4 +83,4 @@ Méthode commune à tous les tests :
   - alertes Telegram du terminal : Samet crée le bot avec @BotFather, le jeton reste dans un fichier local, jamais dans le chat ;
   - déploiement sur un petit serveur loué (VPS), protégé par mot de passe ;
   - journal de trades : c'est la gestion de Samet qui fait ses résultats, et il faut la mesurer.
-- Pousser sur GitLab, uniquement après validation de Samet.
+- Push GitLab réalisé sur demande de Samet ; reste à vérifier le passage en public après modification de la visibilité (voir l'état Git ci-dessus).
