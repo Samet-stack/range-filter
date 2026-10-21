@@ -31,7 +31,7 @@ atrLen = input.int(14, "Periode ATR", minval = 2, maxval = 200, group = G_CORE)
 atrFloor = input.float(0.25, "Largeur minimale / ATR", minval = 0.0, maxval = 3.0, step = 0.05, group = G_CORE)
 rangeBars = input.int(20, "Bougies plates = fin du mouvement", minval = 1, maxval = 500, group = G_CORE)
 
-entryBars = input.int(3, "Fenetre d'achat : bougies apres le BUY", minval = 0, maxval = 50, group = G_ACT, tooltip = "ACHAT reste affiche pendant ces bougies apres le BUY (0 = seulement la bougie du BUY). Ensuite : EN COURS, trop tard.")
+entryBars = input.int(0, "Fenetre d'achat : bougies max apres le BUY (0 = pas de limite)", minval = 0, maxval = 500, group = G_ACT, tooltip = "Par defaut, seule la distance au prix du BUY ferme la fenetre : acheter au prix du BUY reste le meme trade, meme 10 bougies plus tard.")
 lateMaxPct = input.float(1.5, "Trop tard si deja a +x % du BUY", minval = 0.1, step = 0.25, group = G_ACT, tooltip = "Si le prix est deja monte de plus de x % depuis le BUY, la fenetre se ferme.")
 showWindow = input.bool(true, "Fond vert = fenetre d'achat", group = G_ACT)
 showLevels = input.bool(true, "Niveaux de cloture : BUY si > / FIN si <", group = G_ACT, tooltip = "Le BUY (ou la FIN) est confirme si la bougie cloture au-dela de ce niveau. C'est le calcul exact du filtre.")
@@ -282,7 +282,7 @@ bool previewBuy = live and ready and not inMove and close > buyLevel
 bool previewFin = live and ready and inMove and (close < finLevel or (flatBars + 1 >= rangeBars and close <= buyLevel))
 int sinceBuy = inMove ? bar_index - buyBar : na
 float fromBuy = inMove ? close / refPrice - 1.0 : na
-bool buyWindow = inMove and sinceBuy <= entryBars and fromBuy <= lateMaxPct / 100.0
+bool buyWindow = inMove and fromBuy <= lateMaxPct / 100.0 and (entryBars == 0 or sinceBuy <= entryBars)
 
 const int ST_INIT = 0
 const int ST_BUY = 1
@@ -297,7 +297,7 @@ color stateBg = state == ST_BUY ? colUp : state == ST_BUY_FORMING or state == ST
 color stateTxt = state == ST_BUY or state == ST_BUY_FORMING or state == ST_FIN_FORMING ? color.black : color.white
 lvl(float x) =>
     str.tostring(x, format.mintick) + " (" + pct(x / close - 1.0, "0.0") + ")"
-string stateLine = state == ST_INIT ? "historique trop court" : state == ST_BUY ? "BUY " + str.tostring(refPrice, format.mintick) + (sinceBuy == 0 ? ", a cette cloture" : ", il y a " + str.tostring(sinceBuy) + " b.") + "  |  prix " + pct(fromBuy, "0.0") : state == ST_BUY_FORMING ? "pas confirme : BUY si cloture > " + lvl(buyLevel) : state == ST_IN ? "trop tard pour entrer  |  FIN si cloture < " + lvl(finLevel) : state == ST_FIN_FORMING ? (close < finLevel ? "FIN si cloture < " + lvl(finLevel) : "plat trop long : FIN si pas > " + lvl(buyLevel)) : "BUY si cloture > " + lvl(buyLevel)
+string stateLine = state == ST_INIT ? "historique trop court" : state == ST_BUY ? "BUY " + str.tostring(refPrice, format.mintick) + (sinceBuy == 0 ? ", a cette cloture" : ", il y a " + str.tostring(sinceBuy) + " b.") + "  |  prix " + pct(fromBuy, "0.0") : state == ST_BUY_FORMING ? "pas confirme : BUY si cloture > " + lvl(buyLevel) : state == ST_IN ? (fromBuy > lateMaxPct / 100.0 ? "deja " + pct(fromBuy, "0.0") + " depuis le BUY : trop tard" : "fenetre fermee (" + str.tostring(entryBars) + " b.)") + "  |  FIN si cloture < " + lvl(finLevel) : state == ST_FIN_FORMING ? (close < finLevel ? "FIN si cloture < " + lvl(finLevel) : "plat trop long : FIN si pas > " + lvl(buyLevel)) : "BUY si cloture > " + lvl(buyLevel)
 
 bgcolor(showWindow and buyWindow ? color.new(colUp, 84) : showWindow and previewBuy ? color.new(colAmber, 80) : na, title = "Fenetre d'achat")
 
