@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Terminal Range Filter</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { --bg:#0b0e13; --panel:#11161d; --line:#222a35; --fg:#e6edf3; --muted:#8b949e;
+          --up:#00c896; --down:#ff4d6d; --amber:#f0b429; --grey:#5d6470; --violet:#a5b4fc; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 "Inter", "Segoe UI", system-ui, sans-serif; height:100vh; display:grid; grid-template-rows:52px 1fr; }
+  header { display:flex; align-items:center; gap:14px; padding:0 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:15px; margin:0 12px 0 0; letter-spacing:.04em; }
+  header h1 span { color:var(--up); }
+  .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { background:none; border:0; color:var(--muted); padding:6px 12px; cursor:pointer; font:inherit; }
+  .seg button.on { background:#1c2531; color:var(--fg); }
+  .toggle { border:1px solid var(--line); background:none; color:var(--muted); border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
+  .toggle.on { color:var(--violet); border-color:var(--violet); }
+  .spacer { flex:1; }
+  .src { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns:270px 1fr 320px; min-height:0; }
+  aside, section.panel { background:var(--panel); min-height:0; overflow:auto; }
+  aside { border-right:1px solid var(--line); }
+  section.panel { border-left:1px solid var(--line); padding:16px; display:flex; flex-direction:column; gap:14px; }
+  .add { display:flex; gap:6px; padding:10px; border-bottom:1px solid var(--line); }
+  .add input { flex:1; background:var(--bg); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 8px; font:inherit; }
+  .add button { background:#1c2531; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 10px; cursor:pointer; }
+  .row { display:grid; grid-template-columns:1fr auto; gap:2px 8px; padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; position:relative; }
+  .row:hover { background:#151c25; }
+  .row.sel { background:#18212c; box-shadow:inset 3px 0 0 var(--up); }
+  .row .sym { font-weight:600; }
+  .row .px { text-align:right; font-variant-numeric:tabular-nums; }
+  .row .sub { color:var(--muted); font-size:12px; }
+  .row .x { position:absolute; right:4px; top:2px; color:var(--muted); display:none; font-size:12px; padding:2px 4px; }
+  .row:hover .x { display:block; }
+  .badge { display:inline-block; font-size:11px; font-weight:700; padding:2px 7px; border-radius:5px; letter-spacing:.03em; }
+  #chartwrap { position:relative; min-width:0; min-height:0; }
+  #chart { position:absolute; inset:0; }
+  #legend { position:absolute; left:12px; top:10px; z-index:3; font-size:13px; color:var(--muted); pointer-events:none; }
+  #legend b { color:var(--fg); font-size:16px; margin-right:8px; }
+  .state { border-radius:10px; padding:16px; text-align:center; }
+  .state .w { font-size:28px; font-weight:800; letter-spacing:.02em; }
+  .state .d { margin-top:6px; font-size:13px; opacity:.9; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:6px 12px; font-size:13px; }
+  .kv .k { color:var(--muted); }
+  .kv .v { text-align:right; font-variant-numeric:tabular-nums; }
+  h3 { margin:0; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:600; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .inputs { display:flex; gap:8px; }
+  .inputs label { flex:1; font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:4px; }
+  .inputs input { background:var(--bg); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 8px; font:inherit; width:100%; }
+  .note { font-size:12px; color:var(--muted); }
+  .err { color:var(--down); padding:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RANGE FILTER <span>TERMINAL</span></h1>
+  <div class="seg" id="tfs"></div>
+  <button class="toggle" id="kbtn" title="50 futurs imagines par Kronos (image, pas un signal)">Futurs Kronos</button>
+  <div class="spacer"></div>
+  <div class="src" id="src"></div>
+</header>
+<main>
+  <aside>
+    <div class="add"><input id="addin" placeholder="Ajouter : SOL, PURR, kPEPE..."><button id="addbtn">+</button></div>
+    <div id="list"></div>
+  </aside>
+  <div id="chartwrap"><div id="legend"></div><div id="chart"></div></div>
+  <section class="panel">
+    <div class="state" id="state"><div class="w">...</div><div class="d"></div></div>
+    <div class="card">
+      <h3>Maintenant</h3>
+      <div class="kv" id="now"></div>
+    </div>
+    <div class="card">
+      <h3>Fourchette probable</h3>
+      <div class="kv" id="range"></div>
+      <div class="note">Methode simple, testee sur 2026 : le prix depasse le haut environ 1 fois sur 10, et le bas aussi.</div>
+    </div>
+    <div class="card">
+      <h3>Montant</h3>
+      <div class="inputs">
+        <label>Wallet (USDT)<input id="wallet" type="number" min="0" step="10"></label>
+        <label>% par trade<input id="pct" type="number" min="0.1" max="100" step="1"></label>
+      </div>
+      <div class="kv" id="amount"></div>
+    </div>
+    <div class="note" id="knote" style="display:none">Futurs Kronos : 50 scenarios imagines. Teste sur 2026 : direction 50/50, fourchette trop etroite. A regarder, pas a suivre.</div>
+    <div class="note">Donnees publiques (Binance, Bybit, Hyperliquid). Aucun compte, aucune cle, aucun ordre. Les decisions sont les tiennes.</div>
+  </section>
+</main>
+<script>
+const LC = LightweightCharts;
+const TZ = -new Date().getTimezoneOffset() * 60;  // display local time
+const C = { up:'#00c896', down:'#ff4d6d', amber:'#f0b429', grey:'#5d6470', fg:'#e6edf3', muted:'#8b949e', violet:'#a5b4fc' };
+const STYLE = { BUY:[C.up,'#000'], BUY_FORMING:[C.amber,'#000'], FIN_FORMING:[C.amber,'#000'], IN:['#0f5e4b','#fff'],
+                DOWN:[C.down,'#fff'], REGIME:[C.down,'#fff'], WAIT:[C.grey,'#fff'], INIT:[C.grey,'#fff'] };
+const S = {
+  tf: localStorage.tf || '1h',
+  syms: JSON.parse(localStorage.syms || '["BTC","ETH","HYPE","ZEC","SOL"]'),
+  sel: localStorage.sel || 'ETH',
+  kronos: false, data: null, lines: [], kSeries: [], kKey: null,
+};
+const $ = id => document.getElementById(id);
+const fmt = x => x == null ? '-' : x >= 1000 ? x.toLocaleString('fr-FR', {maximumFractionDigits:2}) : x >= 1 ? x.toFixed(4).replace(/0+$/,'').replace(/\.$/,'') : x.toPrecision(5);
+const pct = x => x == null ? '-' : (x >= 0 ? '+' : '') + (100 * x).toFixed(2) + ' %';
+const save = () => { localStorage.tf = S.tf; localStorage.syms = JSON.stringify(S.syms); localStorage.sel = S.sel; };
+
+// --- chart ---
+const chart = LC.createChart($('chart'), {
+  autoSize: true,
+  layout: { background: { color: '#0b0e13' }, textColor: C.muted, fontFamily: 'Inter, Segoe UI, system-ui' },
+  grid: { vertLines: { color: '#131a22' }, horzLines: { color: '#131a22' } },
+  rightPriceScale: { borderColor: '#222a35' },
+  timeScale: { borderColor: '#222a35', timeVisible: true, secondsVisible: false, rightOffset: 28 },
+  crosshair: { mode: 0 },
+});
+const candles = chart.addCandlestickSeries({ upColor: '#e6edf3', downColor: C.down, borderVisible: false, wickUpColor: '#9aa4af', wickDownColor: C.down });
+const halo = chart.addLineSeries({ lineWidth: 8, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+const filt = chart.addLineSeries({ lineWidth: 3, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+const top_ = chart.addLineSeries({ color: C.up, lineWidth: 2, lineStyle: 2, priceLineVisible: false, lastValueVisible: true, title: 'haut probable', crosshairMarkerVisible: false });
+const bot_ = chart.addLineSeries({ color: C.down, lineWidth: 2, lineStyle: 2, priceLineVisible: false, lastValueVisible: true, title: 'bas probable', crosshairMarkerVisible: false });
+
+const dirColor = d => d === 1 ? C.up : d === -1 ? C.down : '#8a8f98';
+const alpha = (hex, a) => hex + Math.round(a * 255).toString(16).padStart(2, '0');
+
+function drawChart(d, reset) {
+  candles.setData(d.candles.map(c => ({ ...c, time: c.time + TZ })));
+  filt.setData(d.filt.map(p => ({ time: p.time + TZ, value: p.value, color: dirColor(p.dir) })));
+  halo.setData(d.filt.map(p => ({ time: p.time + TZ, value: p.value, color: alpha(dirColor(p.dir), 0.18) })));
+  candles.setMarkers(d.events.map(e => e.kind === 'BUY'
+    ? { time: e.time + TZ, position: 'belowBar', color: C.up, shape: 'arrowUp', text: 'BUY ' + fmt(e.price), size: 1.4 }
+    : { time: e.time + TZ, position: 'aboveBar', color: '#8a8f98', shape: 'arrowDown', text: 'FIN ' + pct(e.res) }));
+  S.lines.forEach(l => candles.removePriceLine(l)); S.lines = [];
+  const pl = (price, color, title, style = 2) => price != null && S.lines.push(candles.createPriceLine({ price, color, lineWidth: 2, lineStyle: style, axisLabelVisible: true, title }));
+  if (d.in_move) { pl(d.fin_level, C.down, 'FIN si cloture <'); pl(d.ref, C.muted, 'prix du BUY', 1); }
+  else pl(d.buy_level, C.up, 'BUY si cloture >');
+  if (d.range) {
+    top_.setData([{ time: d.range.t0 + TZ, value: d.range.top }, { time: d.range.t1 + TZ, value: d.range.top }]);
+    bot_.setData([{ time: d.range.t0 + TZ, value: d.range.bot }, { time: d.range.t1 + TZ, value: d.range.bot }]);
+  } else { top_.setData([]); bot_.setData([]); }
+  if (reset) chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 160, to: d.candles.length + 28 });
+  $('legend').innerHTML = `<b>${d.sym}</b>${S.tf} &middot; ${fmt(d.price)}`;
+  $('src').textContent = 'Source : ' + d.src;
+}
+
+function drawPanel(d) {
+  const [bg, fg] = STYLE[d.code] || STYLE.WAIT;
+  $('state').style.background = bg; $('state').style.color = fg;
+  $('state').innerHTML = `<div class="w">${d.word}</div><div class="d">${d.detail}</div>`;
+  const reg = d.regime.up == null ? '<span style="color:var(--muted)">n/a</span>'
+    : `<span style="color:${d.regime.up ? C.up : C.down}">${d.regime.up ? '▲ haussier' : '▼ baissier'} (${pct(d.regime.close / d.regime.sma - 1)} vs moy. 50 j)</span>`;
+  const rows = [['Cloture de la bougie', `<span id="cd"></span>`], ['Fond (journalier)', reg],
+    ['Filtre', `<span style="color:${dirColor(d.fdir)}">${d.fdir === 1 ? '▲ hausse' : d.fdir === -1 ? '▼ baisse' : '■ plat'}</span>`]];
+  if (d.in_move) rows.push(['Depuis BUY : actuel', `<span style="color:${d.price >= d.ref ? C.up : C.down}">${pct(d.price / d.ref - 1)}</span>`],
+                           ['max / pire', `${pct(d.mfe)} / ${pct(d.mae)}`]);
+  $('now').innerHTML = rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
+  const r = d.range;
+  $('range').innerHTML = r ? [['Horizon', `${r.hz} bougies ${S.tf}`], ['Haut probable', `<span style="color:${C.up}">${fmt(r.top)} (${pct(r.top / d.price - 1)})</span>`],
+    ['Bas probable', `<span style="color:${C.down}">${fmt(r.bot)} (${pct(r.bot / d.price - 1)})</span>`]].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('') : '<div class="k">historique trop court</div>';
+  drawAmount();
+  tick();
+}
+
+function drawAmount() {
+  const w = +$('wallet').value || 0, p = +$('pct').value || 0, d = S.data;
+  localStorage.wallet = w; localStorage.pct = p;
+  if (!d || !w) { $('amount').innerHTML = '<div class="k">Saisis ton wallet</div><div></div>'; return; }
+  const a = w * p / 100;
+  $('amount').innerHTML = `<div class="k">Montant</div><div class="v">${a.toLocaleString('fr-FR', {maximumFractionDigits:2})} USDT</div>
+    <div class="k">Quantite</div><div class="v">${(a / d.price).toPrecision(6)} ${d.sym}</div>`;
+}
+
+function tick() {
+  const el = $('cd'); if (!el || !S.data) return;
+  const s = Math.max(0, Math.round((S.data.close_at - Date.now()) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = s % 60;
+  el.textContent = 'dans ' + (h ? h + ' h ' : '') + String(m).padStart(h ? 2 : 1, '0') + ' min ' + String(ss).padStart(2, '0') + ' s';
+}
+
+// --- kronos paths ---
+async function drawKronos() {
+  S.kSeries.forEach(s => chart.removeSeries(s)); S.kSeries = [];
+  if (!S.kronos) return;
+  const r = await fetch(`/api/kronos?sym=${encodeURIComponent(S.sel)}&tf=${S.tf}`);
+  if (!r.ok || !S.kronos) return;
+  const k = await r.json();
+  const mean = k.times.map((t, i) => k.paths.reduce((s, p) => s + p[i], 0) / k.paths.length);
+  for (const p of k.paths) {
+    const s = chart.addLineSeries({ color: 'rgba(165,180,252,0.13)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+    s.setData([{ time: k.start.time + TZ, value: k.start.value }, ...k.times.map((t, i) => ({ time: t + TZ, value: p[i] }))]);
+    S.kSeries.push(s);
+  }
+  const m = chart.addLineSeries({ color: C.violet, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: 'moyenne Kronos', crosshairMarkerVisible: false });
+  m.setData([{ time: k.start.time + TZ, value: k.start.value }, ...k.times.map((t, i) => ({ time: t + TZ, value: mean[i] }))]);
+  S.kSeries.push(m);
+  S.kKey = S.sel + S.tf + k.start.time;
+}
+
+// --- data loops ---
+async function loadChart(reset = false) {
+  const sym = S.sel, tf = S.tf;
+  try {
+    const r = await fetch(`/api/chart?sym=${encodeURIComponent(sym)}&tf=${tf}`);
+    const d = await r.json();
+    if (sym !== S.sel || tf !== S.tf) return;
+    if (d.error) { $('state').innerHTML = `<div class="err">${d.error}</div>`; return; }
+    S.data = d; drawChart(d, reset); drawPanel(d);
+    const lastClosed = d.candles[d.candles.length - (d.live ? 2 : 1)].time;
+    if (S.kronos && S.kKey !== S.sel + S.tf + lastClosed) drawKronos();
+  } catch (e) { $('src').textContent = 'Serveur injoignable'; }
+}
+
+async function loadList() {
+  try {
+    const r = await fetch(`/api/watch?tf=${S.tf}&syms=${encodeURIComponent(S.syms.join(','))}`);
+    const rows = await r.json();
+    $('list').innerHTML = rows.map(w => {
+      if (w.error) return `<div class="row" data-s="${w.sym}"><div class="sym">${w.sym}</div><div class="sub" style="grid-column:1/3;color:var(--down)">introuvable</div><span class="x" data-x="${w.sym}">✕</span></div>`;
+      const [bg, fg] = STYLE[w.code] || STYLE.WAIT;
+      return `<div class="row ${w.sym === S.sel ? 'sel' : ''}" data-s="${w.sym}">
+        <div class="sym">${w.sym} <span class="badge" style="background:${bg};color:${fg}">${w.word}</span></div>
+        <div class="px">${fmt(w.price)}</div>
+        <div class="sub">${w.regime == null ? '' : w.regime ? '<span style="color:var(--up)">▲ fond</span>' : '<span style="color:var(--down)">▼ fond</span>'} &nbsp; ecart ${w.width == null ? '-' : (100 * w.width).toFixed(1) + ' %'}</div>
+        <div class="sub" style="text-align:right;color:${(w.chg24 || 0) >= 0 ? C.up : C.down}">${pct(w.chg24)} 24h</div>
+        <span class="x" data-x="${w.sym}">✕</span></div>`;
+    }).join('');
+  } catch (e) {}
+}
+
+$('list').addEventListener('click', e => {
+  const x = e.target.dataset.x;
+  if (x) { S.syms = S.syms.filter(s => s !== x); save(); loadList(); return; }
+  const row = e.target.closest('.row'); if (!row) return;
+  S.sel = row.dataset.s; save(); S.kKey = null; drawKronos(); loadChart(true); loadList();
+});
+function addSym() {
+  let s = $('addin').value.trim(); if (!s) return;
+  if (!/[a-z]/.test(s.slice(1))) s = s.toUpperCase();  // keep Hyperliquid names like kPEPE
+  if (!S.syms.includes(s)) S.syms.push(s);
+  S.sel = s; $('addin').value = ''; save(); S.kKey = null; drawKronos(); loadChart(true); loadList();
+}
+$('addbtn').onclick = addSym; $('addin').onkeydown = e => e.key === 'Enter' && addSym();
+$('tfs').innerHTML = ['15m', '1h', '4h', '1d'].map(t => `<button data-t="${t}" class="${t === S.tf ? 'on' : ''}">${t}</button>`).join('');
+$('tfs').onclick = e => { const t = e.target.dataset.t; if (!t) return; S.tf = t; save();
+  [...$('tfs').children].forEach(b => b.classList.toggle('on', b.dataset.t === t)); S.kKey = null; drawKronos(); loadChart(true); loadList(); };
+$('kbtn').onclick = () => { S.kronos = !S.kronos; $('kbtn').classList.toggle('on', S.kronos); $('knote').style.display = S.kronos ? '' : 'none'; S.kKey = null; drawKronos(); };
+$('wallet').value = localStorage.wallet || ''; $('pct').value = localStorage.pct || 20;
+$('wallet').oninput = drawAmount; $('pct').oninput = drawAmount;
+
+loadChart(true); loadList();
+setInterval(loadChart, 4000); setInterval(loadList, 15000); setInterval(tick, 1000);
+</script>
+</body>
+</html>
