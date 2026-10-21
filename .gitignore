@@ -2,4 +2,4 @@ backtest/data/
 backtest/data1h/
 __pycache__/
 backtest/kronos_cache/
-kronos-prevision.pine
+kronos-*.pine

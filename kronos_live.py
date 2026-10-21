@@ -1,63 +1,92 @@
-"""Kronos forecast drawn on TradingView.
-Fetches the latest closed candles (Binance; Bybit for HYPE), lets Kronos-small forecast the
-next N candles (several sampled paths), and writes kronos-prevision.pine: paste it into the
-TradingView Pine editor; it draws the mean forecast candles right of the price, plus the
-10-90 % band of the sampled closes. Rerun to refresh.
-Usage: ~/kronos/.venv/bin/python -I kronos_live.py ETH 1h [N=24] [PATHS=30]
-Honesty: on 2026 data, Kronos's predicted direction did not beat chance (backtest/kronos_test.py)."""
+"""Kronos forecast drawn on TradingView, for any crypto.
+For each symbol: fetches the latest closed candles (Binance spot, else Bybit spot, else
+Hyperliquid), lets Kronos-small imagine the next N candles PATHS times, and writes
+kronos-<SYM>-<tf>.pine. Paste it into the TradingView Pine editor: it draws the mean forecast
+candles right of the price, the 10-90 % band of the sampled closes, and the probable high/low
+(1 path in 10 goes beyond each). Rerun to refresh.
+Usage: ~/kronos/.venv/bin/python -I kronos_live.py ETH,SOL,HYPE 1h [N=24] [PATHS=30]"""
 import json, sys, time, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path.home() / "kronos"))
 import numpy as np, pandas as pd, torch
 from model import Kronos, KronosTokenizer, KronosPredictor
 
-sym, tf = sys.argv[1].upper(), sys.argv[2]
+syms, tf = [s.strip() for s in sys.argv[1].split(",") if s.strip()], sys.argv[2]
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 24
 PATHS = int(sys.argv[4]) if len(sys.argv) > 4 else 30
 CTX = 400
 MS = {"15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000}[tf]
+HERE = Path(__file__).parent
 
-def get(url):
-    with urllib.request.urlopen(url, timeout=30) as r:
+def get(url, body=None):
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body else None,
+                                 headers={"Content-Type": "application/json"} if body else {})
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
 
-if sym == "HYPE":
+def binance(s):
+    k = get(f"https://api.binance.com/api/v3/klines?symbol={s.upper()}USDT&interval={tf}&limit={CTX + 1}")
+    return [(r[0], *map(float, r[1:6]), float(r[7])) for r in k], f"Binance {s.upper()}USDT"
+
+def bybit(s):
     iv = {"15m": "15", "30m": "30", "1h": "60", "2h": "120", "4h": "240", "1d": "D"}[tf]
-    k = get(f"https://api.bybit.com/v5/market/kline?category=spot&symbol=HYPEUSDT&interval={iv}&limit={CTX + 1}")["result"]["list"]
-    rows = sorted((int(r[0]), *map(float, r[1:7])) for r in k)
-    src = "Bybit HYPEUSDT"
-else:
-    k = get(f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval={tf}&limit={CTX + 1}")
-    rows = [(r[0], *map(float, r[1:6]), float(r[7])) for r in k]
-    src = f"Binance {sym}USDT"
-now = int(time.time() * 1000)
-rows = [r for r in rows if r[0] + MS <= now][-CTX:]  # closed candles only
-df = pd.DataFrame(rows, columns=["t", "open", "high", "low", "close", "volume", "amount"])
-t_last = int(df.t.iloc[-1])
-xts = pd.Series(pd.to_datetime(df.t, unit="ms"))
-yts = pd.Series(pd.to_datetime([t_last + MS * i for i in range(1, N + 1)], unit="ms"))
+    k = get(f"https://api.bybit.com/v5/market/kline?category=spot&symbol={s.upper()}USDT&interval={iv}&limit={CTX + 1}")["result"]["list"]
+    return sorted((int(r[0]), *map(float, r[1:7])) for r in k), f"Bybit {s.upper()}USDT"
+
+def hyperliquid(s):  # perp candles; coin names are case-sensitive (e.g. kPEPE)
+    now = int(time.time() * 1000)
+    k = get("https://api.hyperliquid.xyz/info", {"type": "candleSnapshot", "req": {
+        "coin": s, "interval": tf, "startTime": now - (CTX + 2) * MS, "endTime": now}})
+    return [(int(r["t"]), float(r["o"]), float(r["h"]), float(r["l"]), float(r["c"]), float(r["v"]),
+             float(r["v"]) * float(r["c"])) for r in k], f"Hyperliquid {s}"
+
+def fetch(s):
+    for src in (binance, bybit, hyperliquid):
+        try:
+            rows, name = src(s)
+        except Exception:
+            continue
+        now = int(time.time() * 1000)
+        rows = [r for r in rows if r[0] + MS <= now][-CTX:]  # closed candles only
+        if len(rows) >= 100:
+            return rows, name
+    return None, None
 
 dev = "cuda:0" if torch.cuda.is_available() else "cpu"
 pred = KronosPredictor(Kronos.from_pretrained("NeoQuasar/Kronos-small"),
                        KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base"), device=dev, max_context=512)
-x = df[["open", "high", "low", "close", "volume", "amount"]]
-paths = pred.predict_batch([x] * PATHS, [xts] * PATHS, [yts] * PATHS, pred_len=N, T=1.0, top_p=0.9, sample_count=1, verbose=False)
-P = {c: np.stack([p[c].to_numpy() for p in paths]) for c in ("open", "high", "low", "close")}
-mean = {c: P[c].mean(0) for c in P}
-lo, hi = np.percentile(P["close"], 10, axis=0), np.percentile(P["close"], 90, axis=0)
-last = df.close.iloc[-1]
-up_share = float((P["close"][:, -1] > last).mean())
-
 f = lambda a: ", ".join(f"{v:.6g}" for v in a)
-stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(t_last / 1000 + MS / 1000))
-pine = f"""// Generated by kronos_live.py, {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}. Source: {src} {tf}, {len(df)} closed candles.
-// Kronos-small forecast, {PATHS} sampled paths. Candles = mean path; band = 10-90 % of closes.
-// Warning: on 2026 data, Kronos's direction did not beat chance. Picture, not a signal.
+pc = lambda x: f"{100 * x:+.1f} %"
+summary = []
+for sym in syms:
+    rows, src = fetch(sym)
+    if not rows:
+        print(f"{sym}: introuvable sur Binance, Bybit et Hyperliquid (ou moins de 100 bougies)."); continue
+    df = pd.DataFrame(rows, columns=["t", "open", "high", "low", "close", "volume", "amount"])
+    t_last = int(df.t.iloc[-1])
+    xts = pd.Series(pd.to_datetime(df.t, unit="ms"))
+    yts = pd.Series(pd.to_datetime([t_last + MS * i for i in range(1, N + 1)], unit="ms"))
+    x = df[["open", "high", "low", "close", "volume", "amount"]]
+    paths = pred.predict_batch([x] * PATHS, [xts] * PATHS, [yts] * PATHS, pred_len=N, T=1.0, top_p=0.9, sample_count=1, verbose=False)
+    P = {c: np.stack([p[c].to_numpy() for p in paths]) for c in ("open", "high", "low", "close")}
+    mean = {c: P[c].mean(0) for c in P}
+    lo, hi = np.percentile(P["close"], 10, axis=0), np.percentile(P["close"], 90, axis=0)
+    last = float(df.close.iloc[-1])
+    top = float(np.percentile(P["high"].max(1), 90))  # 1 path in 10 goes higher
+    bot = float(np.percentile(P["low"].min(1), 10))   # 1 path in 10 goes lower
+    span = f"{N} bougies {tf}"
+    stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(t_last / 1000 + MS / 1000))
+    name = sym.upper()
+    pine = f"""// Generated by kronos_live.py, {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}. Source: {src} {tf}, {len(df)} closed candles.
+// Kronos-small, {PATHS} imagined paths. Candles = mean path; dotted band = 10-90 % of closes;
+// probable high/low = 1 path in 10 goes beyond.
 //@version=6
-indicator("Kronos {sym} {tf}", overlay = true, max_boxes_count = 200, max_lines_count = 300, max_labels_count = 5)
+indicator("Kronos {name} {tf}", overlay = true, max_boxes_count = 200, max_lines_count = 300, max_labels_count = 5)
 const int T0 = {t_last + MS}
 const int DT = {MS}
 const int HALF = {int(MS * 0.35)}
+const float TOP = {top:.6g}
+const float BOT = {bot:.6g}
 var o = array.from({f(mean['open'])})
 var h = array.from({f(mean['high'])})
 var l = array.from({f(mean['low'])})
@@ -70,7 +99,11 @@ if barstate.islast
     bool tfOk = timeframe.in_seconds() * 1000 == DT
     bool fresh = time <= T0 + DT
     string warn = not tfOk ? "\\nMAUVAISE UNITE : mettre le graphique en {tf}" : not fresh ? "\\nPREVISION PERIMEE : relancer kronos_live.py" : ""
-    label.new(T0, h.max() + (h.max() - l.min()) * 0.15, "Kronos {sym} {tf} : {N} bougies\\n{100 * up_share:.0f} % des chemins finissent au-dessus de {last:.6g}\\nCalcule a partir de {stamp}. Image, pas un signal." + warn, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(chart.fg_color, 85), textcolor = chart.fg_color, size = size.normal)
+    int tEnd = T0 + (c.size() - 1) * DT
+    label.new(T0, TOP, "Kronos {name} : {span}\\nHaut probable {top:.6g} ({pc(top / last - 1)})\\nBas probable {bot:.6g} ({pc(bot / last - 1)})\\nDepuis {last:.6g}, calcule a {stamp}" + warn, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(chart.fg_color, 85), textcolor = chart.fg_color, size = size.normal)
+    line.new(T0, TOP, tEnd, TOP, xloc = xloc.bar_time, color = colUp, style = line.style_dashed, width = 2)
+    line.new(T0, BOT, tEnd, BOT, xloc = xloc.bar_time, color = colDn, style = line.style_dashed, width = 2)
+    label.new(tEnd, BOT, "Bas probable {bot:.6g}", xloc = xloc.bar_time, style = label.style_label_up, color = color.new(colDn, 20), textcolor = color.white, size = size.small)
     if tfOk
         for i = 0 to c.size() - 1
             int t = T0 + i * DT
@@ -81,7 +114,10 @@ if barstate.islast
                 line.new(t - DT, bHi.get(i - 1), t, bHi.get(i), xloc = xloc.bar_time, color = color.new(chart.fg_color, 60), style = line.style_dotted)
                 line.new(t - DT, bLo.get(i - 1), t, bLo.get(i), xloc = xloc.bar_time, color = color.new(chart.fg_color, 60), style = line.style_dotted)
 """
-out = Path(__file__).parent / "kronos-prevision.pine"
-out.write_text(pine)
-print(f"{src} {tf}: dernier close {last:.6g} ; fin de prevision {mean['close'][-1]:.6g} "
-      f"({100 * (mean['close'][-1] / last - 1):+.2f} %) ; {100 * up_share:.0f} % des chemins au-dessus. -> {out}")
+    out = HERE / f"kronos-{name}-{tf}.pine"
+    out.write_text(pine)
+    summary.append((top / last - bot / last, name, src, last, top, bot, out.name))
+
+print(f"\nKronos, {N} bougies {tf} (du plus agite au plus calme) :")
+for amp, name, src, last, top, bot, fn in sorted(summary, reverse=True):
+    print(f"  {name:8} {last:<12.6g} haut {top:<12.6g} ({pc(top / last - 1)})  bas {bot:<12.6g} ({pc(bot / last - 1)})  ecart {100 * amp:4.1f} %  [{src}] -> {fn}")
