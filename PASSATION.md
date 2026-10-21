@@ -24,7 +24,7 @@
 |---|---|
 | `range-filter-manuel.pine` | **Indicateur TradingView principal** (Pine v6, `indicator`). États en direct : ACHAT, ACHAT ? (BUY en formation), EN COURS, FIN ?, PAS D'ACHAT, ATTENTE, **FOND BAISSIER** (jour sous sa moyenne 50 jours). Il affiche les niveaux exacts « BUY si clôture > » et « FIN si clôture < », le montant selon le wallet, et une ligne d'honnêteté (BUY contre hasard). Thème sombre demandé. |
 | `range-filter-spot-v4.pine` | La stratégie d'origine. Son moteur est copié tel quel dans l'indicateur. **Ne pas la modifier.** |
-| `terminal/` | **Terminal local** (Flask + Lightweight Charts) : liste de cryptos, graphique en direct, signaux Range Filter, feu journalier, fourchette simple, futurs Kronos en option. Données publiques Binance, puis Bybit, puis Hyperliquid. Écoute uniquement sur `127.0.0.1:7071`. |
+| `terminal/` | **Terminal local** (Flask + Lightweight Charts) : liste de cryptos, graphique en direct, signaux Range Filter, feu journalier, fourchette simple, futurs Kronos en option. Source au choix en haut de la page : **Hyperliquid spot** par défaut (UETH, UBTC, USOL, UZEC, HYPE… contre USDC, avec repli sur le perp s'il n'y a pas de spot), Hyperliquid perp, ou Binance (puis Bybit, puis Hyperliquid). Écoute uniquement sur `127.0.0.1:7071`. |
 | `kronos_live.py` | Génère un Pine qui dessine la prévision Kronos dans TradingView, pour n'importe quelle crypto. C'est une image, pas un signal. |
 | `backtest/` | Toutes les vérifications, détaillées ci-dessous. `data/` (4h) et `data1h/` sont ignorés par git ; on les régénère avec `fetch.py` et `fetch1h.py`. |
 

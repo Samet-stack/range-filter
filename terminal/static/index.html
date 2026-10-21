@@ -19,6 +19,7 @@
   .toggle { border:1px solid var(--line); background:none; color:var(--muted); border-radius:8px; padding:6px 12px; cursor:pointer; font:inherit; }
   .toggle.on { color:var(--violet); border-color:var(--violet); }
   .spacer { flex:1; }
+  select { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font:inherit; }
   .src { color:var(--muted); font-size:12px; }
   main { display:grid; grid-template-columns:270px 1fr 340px; min-height:0; }
   aside, section.panel { background:var(--panel); min-height:0; overflow:auto; }
@@ -59,6 +60,11 @@
 <header>
   <h1>RANGE FILTER <span>TERMINAL</span></h1>
   <div class="seg" id="tfs"></div>
+  <select id="srcsel" title="D'ou viennent les bougies">
+    <option value="hl_spot">Hyperliquid spot</option>
+    <option value="hl_perp">Hyperliquid perp</option>
+    <option value="auto">Binance (auto)</option>
+  </select>
   <button class="toggle" id="kbtn" title="50 futurs imagines par Kronos (image, pas un signal)">Futurs Kronos</button>
   <div class="spacer"></div>
   <div class="src" id="src"></div>
@@ -100,6 +106,7 @@ const STYLE = { BUY:[C.up,'#000'], BUY_FORMING:[C.amber,'#000'], FIN_FORMING:[C.
                 DOWN:[C.down,'#fff'], REGIME:[C.down,'#fff'], WAIT:[C.grey,'#fff'], INIT:[C.grey,'#fff'] };
 const S = {
   tf: localStorage.tf || '1h',
+  src: localStorage.src || 'hl_spot',
   syms: JSON.parse(localStorage.syms || '["BTC","ETH","HYPE","ZEC","SOL"]'),
   sel: localStorage.sel || 'ETH',
   kronos: false, data: null, lines: [], kSeries: [], kKey: null,
@@ -107,7 +114,7 @@ const S = {
 const $ = id => document.getElementById(id);
 const fmt = x => x == null ? '-' : x >= 1000 ? x.toLocaleString('fr-FR', {maximumFractionDigits:2}) : x >= 1 ? x.toFixed(4).replace(/0+$/,'').replace(/\.$/,'') : x.toPrecision(5);
 const pct = x => x == null ? '-' : (x >= 0 ? '+' : '') + (100 * x).toFixed(2) + ' %';
-const save = () => { localStorage.tf = S.tf; localStorage.syms = JSON.stringify(S.syms); localStorage.sel = S.sel; };
+const save = () => { localStorage.src = S.src; localStorage.tf = S.tf; localStorage.syms = JSON.stringify(S.syms); localStorage.sel = S.sel; };
 
 // --- chart ---
 const chart = LC.createChart($('chart'), {
@@ -188,7 +195,7 @@ function tick() {
 async function drawKronos() {
   S.kSeries.forEach(s => chart.removeSeries(s)); S.kSeries = [];
   if (!S.kronos) return;
-  const r = await fetch(`/api/kronos?sym=${encodeURIComponent(S.sel)}&tf=${S.tf}`);
+  const r = await fetch(`/api/kronos?sym=${encodeURIComponent(S.sel)}&tf=${S.tf}&src=${S.src}`);
   if (!r.ok || !S.kronos) return;
   const k = await r.json();
   const mean = k.times.map((t, i) => k.paths.reduce((s, p) => s + p[i], 0) / k.paths.length);
@@ -205,11 +212,11 @@ async function drawKronos() {
 
 // --- data loops ---
 async function loadChart(reset = false) {
-  const sym = S.sel, tf = S.tf;
+  const sym = S.sel, tf = S.tf, src = S.src;
   try {
-    const r = await fetch(`/api/chart?sym=${encodeURIComponent(sym)}&tf=${tf}`);
+    const r = await fetch(`/api/chart?sym=${encodeURIComponent(sym)}&tf=${tf}&src=${S.src}`);
     const d = await r.json();
-    if (sym !== S.sel || tf !== S.tf) return;
+    if (sym !== S.sel || tf !== S.tf || src !== S.src) return;
     if (d.error) { $('state').innerHTML = `<div class="err">${d.error}</div>`; return; }
     S.data = d; drawChart(d, reset); drawPanel(d);
     const lastClosed = d.candles[d.candles.length - (d.live ? 2 : 1)].time;
@@ -219,7 +226,7 @@ async function loadChart(reset = false) {
 
 async function loadList() {
   try {
-    const r = await fetch(`/api/watch?tf=${S.tf}&syms=${encodeURIComponent(S.syms.join(','))}`);
+    const r = await fetch(`/api/watch?tf=${S.tf}&src=${S.src}&syms=${encodeURIComponent(S.syms.join(','))}`);
     const rows = await r.json();
     $('list').innerHTML = rows.map(w => {
       if (w.error) return `<div class="row" data-s="${w.sym}"><div class="sym">${w.sym}</div><div class="sub" style="grid-column:1/3;color:var(--down)">introuvable</div><span class="x" data-x="${w.sym}">✕</span></div>`;
@@ -250,6 +257,8 @@ $('addbtn').onclick = addSym; $('addin').onkeydown = e => e.key === 'Enter' && a
 $('tfs').innerHTML = ['15m', '1h', '4h', '1d'].map(t => `<button data-t="${t}" class="${t === S.tf ? 'on' : ''}">${t}</button>`).join('');
 $('tfs').onclick = e => { const t = e.target.dataset.t; if (!t) return; S.tf = t; save();
   [...$('tfs').children].forEach(b => b.classList.toggle('on', b.dataset.t === t)); S.kKey = null; drawKronos(); loadChart(true); loadList(); };
+$('srcsel').value = S.src;
+$('srcsel').onchange = e => { S.src = e.target.value; save(); S.kKey = null; drawKronos(); loadChart(true); loadList(); };
 $('kbtn').onclick = () => { S.kronos = !S.kronos; $('kbtn').classList.toggle('on', S.kronos); $('knote').style.display = S.kronos ? '' : 'none'; S.kKey = null; drawKronos(); };
 $('wallet').value = localStorage.wallet || ''; $('pct').value = localStorage.pct || 20;
 $('wallet').oninput = drawAmount; $('pct').oninput = drawAmount;

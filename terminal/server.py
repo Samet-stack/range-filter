@@ -1,4 +1,4 @@
-"""Local trading terminal: live candles (Binance, else Bybit, else Hyperliquid), Range Filter signals,
+"""Local trading terminal: live candles (Hyperliquid spot by default; or Hyperliquid perp; or Binance, else Bybit, else Hyperliquid), Range Filter signals,
 daily trend switch, simple probable range, optional Kronos paths. Reads public market data only:
 no account, no key, no order.
 Run: ~/kronos/.venv/bin/python -I ~/range-filter/terminal/server.py   then open http://localhost:7071"""
@@ -61,19 +61,52 @@ def hyperliquid(sym, tf, n):
     return [(int(r["t"]), float(r["o"]), float(r["h"]), float(r["l"]), float(r["c"])) for r in k]
 
 
-SOURCES = {"Binance": binance, "Bybit": bybit, "Hyperliquid": hyperliquid}
+spot_meta = {"at": 0, "names": {}}
 
 
-def candles(sym, tf, n=HIST):
+def hl_spot_coin(sym):
+    """Hyperliquid spot market id for a token against USDC: SYM or its bridged name USYM (UETH, UBTC...)."""
+    if time.time() - spot_meta["at"] > 3600:
+        d = get("https://api.hyperliquid.xyz/info", {"type": "spotMeta"})
+        tok = {t["index"]: t["name"] for t in d["tokens"]}
+        spot_meta["names"] = {tok[u["tokens"][0]].upper(): (u["name"], f"{tok[u['tokens'][0]]}/USDC")
+                              for u in d["universe"] if tok[u["tokens"][1]] == "USDC"}
+        spot_meta["at"] = time.time()
+    names = spot_meta["names"]
+    return names.get(sym.upper()) or names.get("U" + sym.upper())
+
+
+def hl_coin(coin):
+    return lambda sym, tf, n: hyperliquid(coin, tf, n)
+
+
+def fetchers(sym, source):
+    """Candidate (label, fetch) pairs in order of preference."""
+    auto = [("Binance", lambda s, tf, n: binance(s.upper(), tf, n)), ("Bybit", lambda s, tf, n: bybit(s.upper(), tf, n)),
+            ("Hyperliquid perp", hl_coin(sym))]
+    if source == "auto":
+        return auto
+    perp = [("Hyperliquid perp", hl_coin(sym))]
+    if source == "hl_perp":
+        return perp
+    try:
+        m = hl_spot_coin(sym)
+    except Exception:
+        m = None
+    spot = [(f"Hyperliquid spot {m[1]}", hl_coin(m[0]))] if m else []
+    return spot + [("Hyperliquid perp (pas de spot)", hl_coin(sym))]
+
+
+def candles(sym, tf, n=HIST, source="hl_spot"):
     """Cached history; the last candles are refreshed every few seconds."""
-    key, now = (sym, tf), time.time()
+    key, now = (sym, tf, source), time.time()
     with lock:
         c = cache.get(key)
     if c and now - c["tick_at"] < 3:
         return c
     if c and now - c["full_at"] < 600:
         try:
-            new = SOURCES[c["src"]](sym, tf, 3)
+            new = c["fn"](sym, tf, 3)
             rows = {r[0]: r for r in c["rows"]}
             rows.update({r[0]: r for r in new})
             c = dict(c, rows=sorted(rows.values())[-n:], tick_at=now)
@@ -81,15 +114,15 @@ def candles(sym, tf, n=HIST):
             c = dict(c, tick_at=now)
     else:
         c = None
-        for src, f in SOURCES.items():
+        for src, f in fetchers(sym, source):
             try:
-                rows = f(sym if src == "Hyperliquid" else sym.upper(), tf, n)
+                rows = f(sym, tf, n)
             except Exception:
                 continue
             if len(rows) >= 100:
-                c = dict(rows=rows[-n:], src=src, full_at=now, tick_at=now); break
+                c = dict(rows=rows[-n:], src=src, fn=f, full_at=now, tick_at=now); break
         if c is None:
-            raise LookupError(f"{sym} introuvable sur Binance, Bybit et Hyperliquid")
+            raise LookupError(f"{sym} introuvable ({'Hyperliquid' if source != 'auto' else 'Binance, Bybit, Hyperliquid'})")
     with lock:
         cache[key] = c
     return c
@@ -102,12 +135,12 @@ def split(rows, tf):
     return rows, None
 
 
-def analyse(sym, tf):
-    c = candles(sym, tf)
+def analyse(sym, tf, source):
+    c = candles(sym, tf, source=source)
     closed, live = split(c["rows"], tf)
     rf = engine.range_filter(closed, live)
     try:
-        dclosed, _ = split(candles(sym, "1d", 120)["rows"], "1d")
+        dclosed, _ = split(candles(sym, "1d", 120, source)["rows"], "1d")
         reg = engine.regime([r[4] for r in dclosed])
     except Exception:
         reg = dict(up=None, close=None, sma=None)
@@ -124,11 +157,11 @@ def index():
 
 @app.get("/api/watch")
 def watch():
-    tf = request.args.get("tf", "1h")
+    tf, source = request.args.get("tf", "1h"), request.args.get("src", "hl_spot")
     out = []
     for sym in [s.strip() for s in request.args.get("syms", "").split(",") if s.strip()][:30]:
         try:
-            c, closed, live, rf, reg, code, word, detail, rng = analyse(sym, tf)
+            c, closed, live, rf, reg, code, word, detail, rng = analyse(sym, tf, source)
             rows = c["rows"]; t_now = rows[-1][0]
             day_ago = next((r[4] for r in reversed(rows) if r[0] <= t_now - 86_400_000), None)
             out.append(dict(sym=sym, price=rf["price"], chg24=(rf["price"] / day_ago - 1) if day_ago else None,
@@ -141,9 +174,9 @@ def watch():
 
 @app.get("/api/chart")
 def chart():
-    sym, tf = request.args["sym"], request.args.get("tf", "1h")
+    sym, tf, source = request.args["sym"], request.args.get("tf", "1h"), request.args.get("src", "hl_spot")
     try:
-        c, closed, live, rf, reg, code, word, detail, rng = analyse(sym, tf)
+        c, closed, live, rf, reg, code, word, detail, rng = analyse(sym, tf, source)
     except Exception as e:
         return jsonify(error=str(e)), 404
     show = 500
@@ -169,11 +202,11 @@ kronos = {"pred": None, "cache": {}}
 
 @app.get("/api/kronos")
 def kronos_paths():
-    sym, tf = request.args["sym"], request.args.get("tf", "1h")
+    sym, tf, source = request.args["sym"], request.args.get("tf", "1h"), request.args.get("src", "hl_spot")
     paths_n, hz = 50, 24
-    c = candles(sym, tf)
+    c = candles(sym, tf, source=source)
     closed, live = split(c["rows"], tf)
-    key = (sym, tf, closed[-1][0])
+    key = (sym, tf, c["src"], closed[-1][0])
     if key in kronos["cache"]:
         return jsonify(kronos["cache"][key])
     sys.path.insert(0, str(Path.home() / "kronos"))
