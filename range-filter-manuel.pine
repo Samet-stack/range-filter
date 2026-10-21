@@ -280,7 +280,7 @@ var table liveTable = table.new(position.top_right, 2, 5, bgcolor = panelBg, fra
 var table statsTable = table.new(position.bottom_right, 3, 13, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
 
 cell(table t, int c, int r, string s, color col, color bg = na) =>
-    table.cell(t, c, r, s, text_color = col, bgcolor = bg, text_size = szMinor, text_halign = text.align_left)
+    table.cell(t, c, r, s, text_color = col, bgcolor = bg, text_size = szMain, text_halign = text.align_left)
 
 med(array<float> a) =>
     a.size() > 0 ? a.median() : na
