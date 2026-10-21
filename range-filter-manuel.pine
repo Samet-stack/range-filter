@@ -302,26 +302,21 @@ string stateLine = state == ST_INIT ? "historique trop court" : state == ST_BUY 
 bgcolor(showWindow and buyWindow ? color.new(colUp, 84) : showWindow and previewBuy ? color.new(colAmber, 80) : na, title = "Fenetre d'achat")
 
 // Tag and levels live on the last bar only: deleted and redrawn on each update.
+// The level value is written in the tag, so the dashed lines carry no label (no overlap).
 var label stateTag = na
 var line buyLine = na
 var line finLine = na
-var label buyLineLbl = na
-var label finLineLbl = na
 if barstate.islast
     label.delete(stateTag)
     line.delete(buyLine)
     line.delete(finLine)
-    label.delete(buyLineLbl)
-    label.delete(finLineLbl)
     if showTag
         stateTag := label.new(bar_index + 2, close, stateWord + "\n" + stateLine, style = label.style_label_left, color = stateBg, textcolor = stateTxt, size = szBig, textalign = text.align_left)
     if showLevels and ready
         if not inMove and not na(buyLevel)
             buyLine := line.new(bar_index - 3, buyLevel, bar_index + 12, buyLevel, color = colUp, style = line.style_dashed, width = 2)
-            buyLineLbl := label.new(bar_index + 12, buyLevel, "BUY si cloture > " + str.tostring(buyLevel, format.mintick), style = label.style_label_left, color = color.new(colUp, 20), textcolor = color.black, size = szMinor)
         if inMove and not na(finLevel)
             finLine := line.new(bar_index - 3, finLevel, bar_index + 12, finLevel, color = colDown, style = line.style_dashed, width = 2)
-            finLineLbl := label.new(bar_index + 12, finLevel, "FIN si cloture < " + str.tostring(finLevel, format.mintick), style = label.style_label_left, color = color.new(colDown, 20), textcolor = color.white, size = szMinor)
 
 // === ALERTS ===
 // Create one alert with "Any alert() function call". Signals at bar close, not orders.
