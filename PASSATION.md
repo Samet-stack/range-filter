@@ -59,10 +59,10 @@ Méthode commune à tous les tests :
    - **Fourchette** (`backtest/kronos_range_test.py`) : elle est cassée environ 30 % du temps au lieu de 10 %. Son erreur est environ 1,6 fois celle de la méthode simple (quantiles passés × volatilité récente).
    - **Corrigé** en élargissant sa fourchette (`kronos_fix_test.py`) : toujours derrière la méthode simple.
    - **Ré-entraîné** sur nos cryptos avant 2026 (`kronos_finetune.py`, modèle dans `~/kronos/finetuned/crypto/best`) : il imite mieux nos graphiques (erreur de validation 1,438 → 1,372), mais sa fourchette sur 2026 reste derrière la méthode simple (4h : 290 contre 197 ; 1h : 147 contre 92).
-   - **Direction avec le modèle ré-entraîné : test en cours au moment de cette passation.**
-     - Résultats : `backtest/kronos_cache_ft/`.
-     - Relancer : `KRONOS_MODEL=~/kronos/finetuned/crypto/best ~/kronos/.venv/bin/python -I backtest/kronos_test.py 4h,1h`. Le cache par crypto permet de reprendre là où le calcul s'est arrêté.
-     - Règle fixée à l'avance : on ne garde Kronos que si z ≥ 2.
+   - **Direction avec le modèle ré-entraîné** (`KRONOS_MODEL=~/kronos/finetuned/crypto/best`, cache `backtest/kronos_cache_ft/`) : toujours le hasard.
+     - Points de départ quelconques : « Kronos dit hausse » gagne 48 à 49 % contre 50 à 54 % pour « baisse » (1h, ±3 % : z = −2,6). C'est légèrement à l'envers et inexploitable après frais.
+     - BUY filtrés par Kronos : z entre −1,0 et +1,4, sous le seuil fixé à l'avance (z ≥ 2).
+     - **Kronos est donc abandonné comme signal**, sous toutes ses formes testées.
 5. **Le post X « REA + Kronos = terminal Bloomberg »** (@carm1nee) promet exactement ce qui a été testé ici, et ça échoue. Le seul bon conseil du post est « backtest avant de faire confiance ».
 
 ## Autres éléments sur le PC
@@ -74,7 +74,6 @@ Méthode commune à tous les tests :
   - Ne pas lancer `npx rea-agents setup` sans son accord : ça modifie la configuration des agents, et le paquet npm peut différer du code lu. Si on l'installe un jour : le construire depuis le code source lu, dans un environnement isolé.
 
 ## Reste à faire et idées
-- Lire le verdict de direction de Kronos ré-entraîné (voir le point 4).
 - Faire valider par Samet le rendu du terminal et de l'indicateur Pine. Je ne peux pas compiler le Pine ici : il le colle dans TradingView et renvoie les erreurs.
 - Proposé, pas encore demandé :
   - alertes Telegram du terminal : Samet crée le bot avec @BotFather, le jeton reste dans un fichier local, jamais dans le chat ;
