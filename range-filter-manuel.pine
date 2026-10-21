@@ -4,16 +4,22 @@
 // Manual-trading indicator, 2026-10-21: same filter engine as Range Filter Spot V4.
 // BUY at the first up step when no move is open; FIN at the first down step or
 // after a prolonged flat. FIN is information, not an order. No target, no stop:
-// exits are the trader's decision. The tables report what past BUYs actually did
-// on the displayed chart, next to random entries held for the same durations.
-// This script reads no wallet and places no order. No affiliation implied.
+// exits are the trader's decision. Each move is drawn as two zones (best gain
+// reached, worst dip). The verdict asks one directional question: after a BUY,
+// does +x% come before -x% more often than from any bar? (Reaching +x% alone is
+// not evidence: BUYs come in volatile phases, where -x% also comes more often.)
+// This script reads no wallet and places no order.
+// No affiliation implied.
 //@version=6
-indicator("Range Filter Manuel", overlay = true, max_bars_back = 5000, max_labels_count = 500)
+indicator("Range Filter Manuel", overlay = true, max_bars_back = 5000, max_labels_count = 500, max_boxes_count = 500)
 
 const string G_CORE = "1. Filtre"
 const string G_TRADE = "2. Mon trade"
 const string G_STATS = "3. Statistiques"
 const string G_VIS = "4. Affichage"
+const string SZ_S = "Petit"
+const string SZ_M = "Normal"
+const string SZ_L = "Grand"
 
 periodIn = input.int(100, "Periode", minval = 2, maxval = 1000, group = G_CORE)
 multIn = input.float(3.0, "Multiplicateur", minval = 0.5, step = 0.25, group = G_CORE, tooltip = "Plus petit = BUY plus tot, mais plus de faux departs.")
@@ -27,20 +33,35 @@ feeRtPct = input.float(0.20, "Frais aller-retour (%)", minval = 0.0, step = 0.01
 
 statsStart = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Stats depuis", group = G_STATS)
 thr1 = input.float(2.0, "Seuil 1 (%)", minval = 0.1, step = 0.5, group = G_STATS)
-thr2 = input.float(3.0, "Seuil 2 (%)", minval = 0.1, step = 0.5, group = G_STATS)
+thr2 = input.float(3.0, "Seuil 2 (%) = seuil du verdict", minval = 0.1, step = 0.5, group = G_STATS, tooltip = "Verdict : apres un BUY, +X % arrive-t-il avant -X % plus souvent qu'en achetant a n'importe quelle bougie ?")
 thr3 = input.float(5.0, "Seuil 3 (%)", minval = 0.1, step = 0.5, group = G_STATS)
-randSamples = input.int(20, "Tirages au hasard par BUY", minval = 0, maxval = 100, group = G_STATS, tooltip = "Pour chaque BUY termine : N achats a des bougies tirees au hasard dans l'historique, gardes la meme duree. Si les BUY ne font pas mieux que le hasard, le filtre n'apporte rien sur ce graphique.")
+dirCap = input.int(300, "Horizon max du test (bougies)", minval = 10, maxval = 1000, group = G_STATS, tooltip = "Un depart sans +X % ni -X % au bout de cet horizon n'est pas compte.")
 
 colUp = input.color(#00c896, "Hausse", group = G_VIS)
-colDown = input.color(#ff3b3b, "Baisse", group = G_VIS)
-colFlat = input.color(#808080, "Plat", group = G_VIS)
-lineWidth = input.int(2, "Epaisseur", minval = 1, maxval = 8, group = G_VIS)
-showBands = input.bool(false, "Afficher bande haute et seuil d'inversion", group = G_VIS)
+colDown = input.color(#ff4d4d, "Baisse", group = G_VIS)
+colFlat = input.color(#8a8f98, "Plat", group = G_VIS)
+lineWidth = input.int(3, "Epaisseur du filtre", minval = 1, maxval = 8, group = G_VIS)
+textSizeIn = input.string(SZ_M, "Taille du texte", options = [SZ_S, SZ_M, SZ_L], group = G_VIS)
+showCloud = input.bool(false, "Nuage de tendance (entre filtre et prix)", group = G_VIS)
+colorBars = input.bool(false, "Colorer les bougies selon le filtre", group = G_VIS)
+showBands = input.bool(false, "Bande haute et seuil d'inversion", group = G_VIS)
+showZones = input.bool(true, "Zones des mouvements (max atteint / pire baisse)", group = G_VIS, tooltip = "Vert : du prix du BUY au plus haut atteint. Rouge : du prix du BUY au plus bas atteint. Figees a chaque cloture.")
+zonesKept = input.int(30, "Zones : derniers mouvements affiches", minval = 1, maxval = 250, group = G_VIS)
 showLabels = input.bool(true, "Etiquettes BUY / FIN", group = G_VIS)
-showLive = input.bool(true, "Tableau : situation en cours", group = G_VIS)
-showStats = input.bool(true, "Tableau : ce qu'ont donne les BUY", group = G_VIS)
+showTag = input.bool(true, "Etiquette du trade en cours a droite du prix", group = G_VIS)
+showLive = input.bool(true, "Panneau : situation en cours", group = G_VIS)
+showStats = input.bool(true, "Panneau : ce qu'ont donne les BUY", group = G_VIS)
 
 float feeRt = feeRtPct / 100.0
+string szMain = textSizeIn == SZ_S ? size.small : textSizeIn == SZ_L ? size.large : size.normal
+string szMinor = textSizeIn == SZ_S ? size.tiny : textSizeIn == SZ_L ? size.normal : size.small
+// Panel colours follow the chart theme, so text stays readable on light and dark charts.
+color fg = chart.fg_color
+color fgMuted = color.new(chart.fg_color, 45)
+color panelBg = color.new(chart.bg_color, 5)
+color panelLine = color.new(chart.fg_color, 85)
+color colAmber = #f0b429
+color colNeutral = #5d6470
 
 if barstate.isfirst and not chart.is_standard
     runtime.error("Utiliser des bougies standard : Heikin Ashi, Renko, etc. faussent les prix.")
@@ -104,14 +125,13 @@ var float mfe = na
 var float mae = na
 var float maeAtPeak = na
 var label buyLabel = na
+var box gainBox = na
+var box dipBox = na
+var zoneBoxes = array.new<box>()
 var aMfe = array.new<float>()
 var aMaePeak = array.new<float>()
 var aRes = array.new<float>()
 var aDur = array.new<int>()
-var bMfe = array.new<float>()
-var bRes = array.new<float>()
-// Deterministic Park-Miller generator: same draws on every reload.
-var float rng = 42.0
 
 bool buySignal = false
 bool endSignal = false
@@ -128,6 +148,13 @@ if barstate.isconfirmed
             maeAtPeak := mae
             mfe := high / refPrice - 1.0
         mae := math.min(mae, low / refPrice - 1.0)
+        if showZones
+            gainBox.set_right(bar_index)
+            gainBox.set_top(refPrice * (1.0 + mfe))
+            gainBox.set_text(mfe > 0 ? pct(mfe, "0.0") : "")
+            dipBox.set_right(bar_index)
+            dipBox.set_bottom(refPrice * (1.0 + mae))
+            dipBox.set_text(mae < 0 ? pct(mae, "0.0") : "")
         if stepDirection == -1 or flatBars >= rangeBars
             endSignal := true
             endReason := stepDirection == -1 ? "inversion du filtre" : "plat prolonge"
@@ -135,25 +162,13 @@ if barstate.isconfirmed
             inMove := false
             int dur = bar_index - buyBar
             if showLabels
-                buyLabel.set_text("BUY\n" + pct(mfe, "0.0"))
+                buyLabel.set_text("BUY " + str.tostring(refPrice, format.mintick) + "\nmax " + pct(mfe, "0.0"))
                 buyLabel.set_tooltip("Achat de reference : " + str.tostring(refPrice, format.mintick) + "\nMax atteint : " + pct(mfe, "0.00") + "\nBaisse avant le max : " + pct(maeAtPeak, "0.00") + "\nPire baisse : " + pct(mae, "0.00") + "\nResultat a FIN apres frais : " + pct(moveRes, "0.00") + "\nDuree : " + str.tostring(dur) + " bougies")
             if buyTime >= statsStart
                 aMfe.push(mfe)
                 aMaePeak.push(maeAtPeak)
                 aRes.push(moveRes)
                 aDur.push(dur)
-                // Random entries held for the same duration, anywhere in the loaded history.
-                int maxBack = math.min(4900, bar_index - warmupBars)
-                if randSamples > 0 and maxBack > dur + 1
-                    for k = 1 to randSamples
-                        rng := (rng * 16807.0) % 2147483647.0
-                        int o = dur + 1 + int(math.floor(rng / 2147483647.0 * (maxBack - dur)))
-                        float r0 = close[o]
-                        float hi = 0.0
-                        for j = 1 to dur
-                            hi := math.max(hi, high[o - j])
-                        bMfe.push(math.max(0.0, hi / r0 - 1.0))
-                        bRes.push(close[o - dur] / r0 - 1.0 - feeRt)
     else if readyOnClose and stepDirection == 1
         buySignal := true
         inMove := true
@@ -164,20 +179,94 @@ if barstate.isconfirmed
         mae := 0.0
         maeAtPeak := 0.0
         if showLabels
-            buyLabel := label.new(bar_index, low, "BUY", yloc = yloc.belowbar, style = label.style_label_up, color = colUp, textcolor = color.black, size = size.small, tooltip = "Mouvement en cours depuis " + str.tostring(close, format.mintick))
+            buyLabel := label.new(bar_index, low, "BUY\n" + str.tostring(close, format.mintick), yloc = yloc.belowbar, style = label.style_label_up, color = colUp, textcolor = color.black, size = szMain, tooltip = "Mouvement en cours depuis " + str.tostring(close, format.mintick))
+        if showZones
+            gainBox := box.new(bar_index, close, bar_index, close, border_color = color.new(colUp, 55), bgcolor = color.new(colUp, 82), text_color = fg, text_size = szMinor, text_halign = text.align_center, text_valign = text.align_top)
+            dipBox := box.new(bar_index, close, bar_index, close, border_color = color.new(colDown, 65), bgcolor = color.new(colDown, 86), text_color = fg, text_size = szMinor, text_halign = text.align_center, text_valign = text.align_bottom)
+            zoneBoxes.push(gainBox)
+            zoneBoxes.push(dipBox)
+            while zoneBoxes.size() > 2 * zonesKept
+                zoneBoxes.shift().delete()
 
 if showLabels and endSignal
-    label.new(bar_index, high, "FIN\n" + pct(moveRes, "0.0"), yloc = yloc.abovebar, style = label.style_label_down, color = color.new(colFlat, 30), textcolor = color.white, size = size.tiny, tooltip = "Fin du mouvement : " + endReason + "\nResultat si vendu ici, apres frais : " + pct(moveRes, "0.00") + "\nInformation, pas un ordre.")
+    label.new(bar_index, high, "FIN " + pct(moveRes, "0.0"), yloc = yloc.abovebar, style = label.style_label_down, color = color.new(colFlat, 15), textcolor = color.white, size = szMinor, tooltip = "Fin du mouvement : " + endReason + "\nResultat si vendu ici, apres frais : " + pct(moveRes, "0.00") + "\nInformation, pas un ordre.")
+
+// === DIRECTION TEST: +x before -x, from BUY closes vs every 5th close ===
+// Counts per threshold k: slot k*2 = BUY starts, slot k*2+1 = baseline starts.
+var tRef = array.new<float>()
+var tBar = array.new<int>()
+var tBuy = array.new<bool>()
+var tS1 = array.new<int>()
+var tS2 = array.new<int>()
+var tS3 = array.new<int>()
+var cUp = array.new<int>(6, 0)
+var cN = array.new<int>(6, 0)
+
+// Same bar touching both levels counts as down (conservative: OHLC hides the order).
+resolve(array<int> st, int i, float ref, float x, bool isBuy, int k) =>
+    int s = st.get(i)
+    if s == -1
+        s := low <= ref * (1.0 - x) ? 0 : high >= ref * (1.0 + x) ? 1 : -1
+        if s != -1
+            st.set(i, s)
+            int slot = k * 2 + (isBuy ? 0 : 1)
+            cN.set(slot, cN.get(slot) + 1)
+            cUp.set(slot, cUp.get(slot) + s)
+    s
+
+track(float ref, bool isBuy) =>
+    tRef.push(ref)
+    tBar.push(bar_index)
+    tBuy.push(isBuy)
+    tS1.push(-1)
+    tS2.push(-1)
+    tS3.push(-1)
+
+if barstate.isconfirmed
+    int i = tRef.size() - 1
+    while i >= 0
+        float ref = tRef.get(i)
+        bool isB = tBuy.get(i)
+        int s1 = resolve(tS1, i, ref, thr1 / 100.0, isB, 0)
+        int s2 = resolve(tS2, i, ref, thr2 / 100.0, isB, 1)
+        int s3 = resolve(tS3, i, ref, thr3 / 100.0, isB, 2)
+        if (s1 != -1 and s2 != -1 and s3 != -1) or bar_index - tBar.get(i) >= dirCap
+            tRef.remove(i)
+            tBar.remove(i)
+            tBuy.remove(i)
+            tS1.remove(i)
+            tS2.remove(i)
+            tS3.remove(i)
+        i -= 1
+    if readyOnClose and time >= statsStart
+        if buySignal
+            track(close, true)
+        if bar_index % 5 == 0
+            track(close, false)
 
 // === VISUALS ===
 color dirColor = filterDirection == 1 ? colUp : filterDirection == -1 ? colDown : colFlat
-plot(filt, "Filtre", color = dirColor, linewidth = lineWidth, style = plot.style_linebr)
-plot(showBands ? filt + rangeOnClose : na, "Bande haute", color = color.new(dirColor, 75), style = plot.style_linebr)
-plot(showBands ? filt - rangeOnClose : na, "Seuil d'inversion", color = color.new(dirColor, 60), style = plot.style_linebr)
-plot(inMove ? refPrice : na, "Prix du BUY", color = color.new(color.white, 30), style = plot.style_linebr)
-plot(inMove ? refPrice * (1.0 + mfe) : na, "Max atteint depuis le BUY", color = color.new(colUp, 40), style = plot.style_linebr)
+plot(filt, "Filtre (halo)", color = color.new(dirColor, 82), linewidth = lineWidth + 5, style = plot.style_linebr)
+filtPlot = plot(filt, "Filtre", color = dirColor, linewidth = lineWidth, style = plot.style_linebr)
+pricePlot = plot(close, "Prix (nuage)", display = display.none, editable = false)
+fill(filtPlot, pricePlot, color = showCloud and not na(filt) ? color.new(dirColor, 88) : na, title = "Nuage de tendance")
+plot(showBands ? filt + rangeOnClose : na, "Bande haute", color = color.new(dirColor, 60), style = plot.style_linebr)
+plot(showBands ? filt - rangeOnClose : na, "Seuil d'inversion", color = color.new(dirColor, 45), style = plot.style_linebr)
+plot(inMove and not showZones ? refPrice : na, "Prix du BUY", color = fgMuted, style = plot.style_linebr)
+barcolor(colorBars ? dirColor : na)
 plot(filterDirection, "Sens du filtre", display = display.data_window)
 plot(rangeOnClose / close * 100.0, "Largeur (% du prix)", display = display.data_window)
+
+// Live tag next to the price; it includes the forming bar, the zones only closed bars.
+var label liveTag = na
+if barstate.islast
+    label.delete(liveTag)
+    liveTag := na
+    if showTag and inMove
+        float nowPct = close / refPrice - 1.0
+        float bestPct = math.max(mfe, high / refPrice - 1.0)
+        float worstPct = math.min(mae, low / refPrice - 1.0)
+        liveTag := label.new(bar_index + 2, close, "Depuis BUY  " + pct(nowPct, "0.00") + "\nmax " + pct(bestPct, "0.0") + "  |  pire " + pct(worstPct, "0.0"), style = label.style_label_left, color = nowPct >= 0 ? colUp : colDown, textcolor = nowPct >= 0 ? color.black : color.white, size = szMain)
 
 // === ALERTS ===
 // Create one alert with "Any alert() function call". Signals at bar close, not orders.
@@ -186,18 +275,12 @@ if buySignal
 if endSignal
     alert(syminfo.ticker + " " + timeframe.period + " : FIN du mouvement (" + endReason + "), " + pct(moveRes, "0.00") + " depuis le BUY", alert.freq_once_per_bar_close)
 
-// === TABLES ===
-var table liveTable = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 20), border_width = 1)
-var table statsTable = table.new(position.bottom_right, 3, 10, bgcolor = color.new(color.black, 20), border_width = 1)
+// === PANELS ===
+var table liveTable = table.new(position.top_right, 2, 5, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
+var table statsTable = table.new(position.bottom_right, 3, 13, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
 
-cell(table t, int c, int r, string s, color col) =>
-    table.cell(t, c, r, s, text_color = col, text_size = size.small, text_halign = text.align_left)
-
-shareAtLeast(array<float> a, float t) =>
-    int cnt = 0
-    for v in a
-        cnt += v >= t ? 1 : 0
-    a.size() > 0 ? 100.0 * cnt / a.size() : na
+cell(table t, int c, int r, string s, color col, color bg = na) =>
+    table.cell(t, c, r, s, text_color = col, bgcolor = bg, text_size = szMinor, text_halign = text.align_left)
 
 med(array<float> a) =>
     a.size() > 0 ? a.median() : na
@@ -205,53 +288,74 @@ med(array<float> a) =>
 avg(array<float> a) =>
     a.size() > 0 ? a.avg() : na
 
-share(float x) =>
-    na(x) ? "n/a" : str.tostring(x, "0") + " %"
+shareOf(int up, int n) =>
+    n > 0 ? 100.0 * up / n : na
+
+// Gap between the BUY share and the baseline share, in standard errors (two proportions).
+zOf(int k) =>
+    int n1 = cN.get(k * 2)
+    int n0 = cN.get(k * 2 + 1)
+    float p1 = n1 > 0 ? float(cUp.get(k * 2)) / n1 : na
+    float p0 = n0 > 0 ? float(cUp.get(k * 2 + 1)) / n0 : na
+    na(p1) or na(p0) or p0 <= 0.0 or p0 >= 1.0 ? na : (p1 - p0) / math.sqrt(p0 * (1.0 - p0) * (1.0 / n1 + 1.0 / n0))
+
+zColor(float z) =>
+    na(z) ? fg : z >= 2.0 ? colUp : z <= -2.0 ? colDown : fg
 
 if barstate.islast and showLive
-    string dirText = not readyOnClose ? "INITIALISATION" : filterDirection == 1 ? "HAUSSE" : filterDirection == -1 ? "BAISSE" : "PLAT"
-    string moveText = inMove ? "BUY a " + str.tostring(refPrice, format.mintick) + " il y a " + str.tostring(bar_index - buyBar) + " b." : "aucun"
-    float nowPct = inMove ? close / refPrice - 1.0 : na
-    cell(liveTable, 0, 0, "Range Filter", color.silver)
-    cell(liveTable, 1, 0, dirText, dirColor)
-    cell(liveTable, 0, 1, "Mouvement", color.silver)
-    cell(liveTable, 1, 1, moveText, color.white)
-    cell(liveTable, 0, 2, "Actuel / max / pire", color.silver)
-    cell(liveTable, 1, 2, inMove ? pct(nowPct, "0.00") + "  /  " + pct(mfe, "0.00") + "  /  " + pct(mae, "0.00") : "-", inMove ? (nowPct >= 0 ? colUp : colDown) : color.white)
+    string dirText = not readyOnClose ? "INITIALISATION" : filterDirection == 1 ? "▲ HAUSSE" : filterDirection == -1 ? "▼ BAISSE" : "■ PLAT"
+    color dirText_col = filterDirection == 1 ? color.black : color.white
+    cell(liveTable, 0, 0, "Range Filter", dirText_col, dirColor)
+    cell(liveTable, 1, 0, dirText, dirText_col, dirColor)
+    cell(liveTable, 0, 1, "Mouvement", fgMuted)
+    cell(liveTable, 1, 1, inMove ? "BUY a " + str.tostring(refPrice, format.mintick) + ", il y a " + str.tostring(bar_index - buyBar) + " b." : "aucun", fg)
+    float nowLive = inMove ? close / refPrice - 1.0 : na
+    cell(liveTable, 0, 2, "Actuel / max / pire", fgMuted)
+    cell(liveTable, 1, 2, inMove ? pct(nowLive, "0.00") + "  /  " + pct(math.max(mfe, high / refPrice - 1.0), "0.0") + "  /  " + pct(math.min(mae, low / refPrice - 1.0), "0.0") : "-", inMove ? (nowLive >= 0 ? colUp : colDown) : fg)
     if walletIn > 0
         float amount = walletIn * sizePct / 100.0
-        cell(liveTable, 0, 3, "Montant (" + str.tostring(sizePct, "0.#") + " %)", color.silver)
-        cell(liveTable, 1, 3, str.tostring(amount, "#,##0.00") + " " + syminfo.currency + "  =  " + str.tostring(amount / close, "#,##0.####") + " " + syminfo.basecurrency, color.white)
-    cell(liveTable, 0, 4, "Frais AR supposes", color.silver)
-    cell(liveTable, 1, 4, str.tostring(feeRtPct, "0.00") + " %", color.gray)
+        cell(liveTable, 0, 3, "Montant (" + str.tostring(sizePct, "0.#") + " %)", fgMuted)
+        cell(liveTable, 1, 3, str.tostring(amount, "#,##0.00") + " " + syminfo.currency + "  =  " + str.tostring(amount / close, "#,##0.####") + " " + syminfo.basecurrency, fg)
+    cell(liveTable, 0, 4, "Frais AR supposes", fgMuted)
+    cell(liveTable, 1, 4, str.tostring(feeRtPct, "0.00") + " %", fgMuted)
+
+// Merge once: merged cells cannot be merged again.
+if barstate.isfirst
+    statsTable.merge_cells(0, 0, 2, 0)
+    statsTable.merge_cells(0, 1, 2, 1)
+    statsTable.merge_cells(0, 6, 2, 6)
+    statsTable.merge_cells(0, 12, 2, 12)
 
 if barstate.islast and showStats
+    int nBuy = cN.get(2)
+    float z = zOf(1)
+    string thrTxt = str.tostring(thr2, "0.#") + " %"
+    string verdict = nBuy < 30 ? "Trop peu de BUY pour juger (n = " + str.tostring(nBuy) + ")" : na(z) ? "Pas de comparaison possible" : z >= 2.0 ? "AVANTAGE : apres un BUY, +" + thrTxt + " vient avant -" + thrTxt + " plus souvent" : z >= 1.0 ? "Leger mieux que le hasard, pas prouve" : z > -1.0 ? "AUCUN AVANTAGE : comme acheter a n'importe quelle bougie" : z > -2.0 ? "Un peu moins bien que le hasard" : "PIRE que le hasard"
+    color verdictBg = nBuy < 30 or na(z) ? colNeutral : z >= 2.0 ? colUp : z >= 1.0 ? colAmber : z > -1.0 ? colNeutral : colDown
+    cell(statsTable, 0, 0, "Ce qu'ont donne les BUY, depuis " + str.format_time(statsStart, "yyyy-MM-dd"), fg)
+    cell(statsTable, 0, 1, verdict + (nBuy < 30 or na(z) ? "" : "  (z = " + str.tostring(z, "0.0") + ", n = " + str.tostring(nBuy) + ")"), nBuy >= 30 and not na(z) and z >= 1.0 ? color.black : color.white, verdictBg)
+    cell(statsTable, 0, 2, "Apres un BUY, d'abord :", fgMuted)
+    cell(statsTable, 1, 2, "BUY", fg)
+    cell(statsTable, 2, 2, "N'importe quand", fgMuted)
+    array<float> thrs = array.from(thr1, thr2, thr3)
+    for k = 0 to 2
+        string t = str.tostring(thrs.get(k), "0.#") + " %"
+        float zk = zOf(k)
+        cell(statsTable, 0, 3 + k, "+" + t + " avant -" + t, fgMuted)
+        cell(statsTable, 1, 3 + k, na(shareOf(cUp.get(k * 2), cN.get(k * 2))) ? "n/a" : str.tostring(shareOf(cUp.get(k * 2), cN.get(k * 2)), "0") + " %", zColor(zk))
+        cell(statsTable, 2, 3 + k, na(shareOf(cUp.get(k * 2 + 1), cN.get(k * 2 + 1))) ? "n/a" : str.tostring(shareOf(cUp.get(k * 2 + 1), cN.get(k * 2 + 1)), "0") + " %", fgMuted)
+    cell(statsTable, 0, 6, "Mouvements BUY -> FIN (descriptif)", fgMuted)
     int n = aMfe.size()
-    cell(statsTable, 0, 0, "Depuis " + str.format_time(statsStart, "yyyy-MM-dd"), color.silver)
-    cell(statsTable, 1, 0, "BUY", color.silver)
-    cell(statsTable, 2, 0, "Hasard", color.silver)
-    cell(statsTable, 0, 1, "Mouvements termines", color.silver)
-    cell(statsTable, 1, 1, str.tostring(n), color.white)
-    cell(statsTable, 2, 1, str.tostring(bMfe.size()) + " tirages", color.gray)
-    cell(statsTable, 0, 2, "Max atteint (mediane)", color.silver)
-    cell(statsTable, 1, 2, pct(med(aMfe), "0.00"), color.white)
-    cell(statsTable, 2, 2, pct(med(bMfe), "0.00"), color.gray)
-    cell(statsTable, 0, 3, "Montent d'au moins " + str.tostring(thr1, "0.#") + " %", color.silver)
-    cell(statsTable, 1, 3, share(shareAtLeast(aMfe, thr1 / 100.0)), color.white)
-    cell(statsTable, 2, 3, share(shareAtLeast(bMfe, thr1 / 100.0)), color.gray)
-    cell(statsTable, 0, 4, "Montent d'au moins " + str.tostring(thr2, "0.#") + " %", color.silver)
-    cell(statsTable, 1, 4, share(shareAtLeast(aMfe, thr2 / 100.0)), color.white)
-    cell(statsTable, 2, 4, share(shareAtLeast(bMfe, thr2 / 100.0)), color.gray)
-    cell(statsTable, 0, 5, "Montent d'au moins " + str.tostring(thr3, "0.#") + " %", color.silver)
-    cell(statsTable, 1, 5, share(shareAtLeast(aMfe, thr3 / 100.0)), color.white)
-    cell(statsTable, 2, 5, share(shareAtLeast(bMfe, thr3 / 100.0)), color.gray)
-    cell(statsTable, 0, 6, "Baisse avant le max (mediane)", color.silver)
-    cell(statsTable, 1, 6, pct(med(aMaePeak), "0.00"), color.white)
-    cell(statsTable, 2, 6, "", color.gray)
-    cell(statsTable, 0, 7, "Si vendu a FIN, apres frais (moy.)", color.silver)
-    cell(statsTable, 1, 7, pct(avg(aRes), "0.00"), color.white)
-    cell(statsTable, 2, 7, pct(avg(bRes), "0.00"), color.gray)
-    cell(statsTable, 0, 8, "Duree (mediane)", color.silver)
-    cell(statsTable, 1, 8, aDur.size() > 0 ? str.tostring(aDur.median(), "0") + " bougies" : "n/a", color.white)
-    cell(statsTable, 2, 8, "meme duree", color.gray)
-    cell(statsTable, 0, 9, "Historique charge seulement. Passe =/= futur.", color.gray)
+    cell(statsTable, 0, 7, "Mouvements termines", fgMuted)
+    cell(statsTable, 1, 7, str.tostring(n), fg)
+    cell(statsTable, 0, 8, "Max atteint (mediane)", fgMuted)
+    cell(statsTable, 1, 8, pct(med(aMfe), "0.00"), fg)
+    cell(statsTable, 0, 9, "Baisse avant le max (mediane)", fgMuted)
+    cell(statsTable, 1, 9, pct(med(aMaePeak), "0.00"), fg)
+    cell(statsTable, 0, 10, "Si vendu a FIN, apres frais (moy.)", fgMuted)
+    cell(statsTable, 1, 10, pct(avg(aRes), "0.00"), fg)
+    cell(statsTable, 0, 11, "Duree (mediane)", fgMuted)
+    cell(statsTable, 1, 11, aDur.size() > 0 ? str.tostring(aDur.median(), "0") + " bougies" : "n/a", fg)
+    for r = 7 to 11
+        cell(statsTable, 2, r, "", fgMuted)
+    cell(statsTable, 0, 12, "Reference : une bougie sur 5. Historique charge seulement. Passe =/= futur.", fgMuted)

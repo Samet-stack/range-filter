@@ -69,3 +69,20 @@ if __name__ == "__main__":
             nxt = {bars[i][0]: bars[i + 1][0] for i in range(len(bars) - 1)}
             assert [nxt[x["t"]] for x in out] == [x["t_in"] for x in ctl if x["reason"] != "OUVERTE"], (s, tf)
             table(f"{s} {tf}", out, base)
+
+def direction(bars, buys_t, thresholds=(0.02, 0.03, 0.05), cap=300, every=5, start=T2024, warm=300):
+    """Replica of the Pine verdict: from each start close, does +x come before -x? (cap bars,
+    same bar touching both = down). Starts: BUY bars, and every `every`-th bar as the baseline."""
+    t = [b[0] for b in bars]; h = [b[2] for b in bars]; l = [b[3] for b in bars]; c = [b[4] for b in bars]
+    buy_set = set(buys_t); res = {True: [[0, 0] for _ in thresholds], False: [[0, 0] for _ in thresholds]}
+    for i in range(warm, len(c)):
+        if t[i] < start:
+            continue
+        for is_buy in ((True,) if t[i] in buy_set else ()) + ((False,) if i % every == 0 else ()):
+            for k, x in enumerate(thresholds):
+                for j in range(i + 1, min(len(c), i + cap + 1)):
+                    if l[j] <= c[i] * (1 - x):
+                        res[is_buy][k][1] += 1; break
+                    if h[j] >= c[i] * (1 + x):
+                        res[is_buy][k][0] += 1; res[is_buy][k][1] += 1; break
+    return res
