@@ -7,7 +7,8 @@
 // exits are the trader's decision. The live bar answers "what now?": ACHAT (buy
 // window open), ACHAT ? (the forming bar closes into a BUY if it holds), EN COURS
 // (too late to enter), FIN ?, PAS D'ACHAT, ATTENTE, with the exact close levels
-// that trigger BUY or FIN. Optional zones show each past move (best gain, worst
+// that trigger BUY or FIN. FOND BAISSIER blocks buying while the daily close is
+// below its 50-day average (cut the worst drawdown in 2024-26 tests). Optional zones show each past move (best gain, worst
 // dip). The verdict asks one directional question: after a BUY,
 // does +x% come before -x% more often than from any bar? (Reaching +x% alone is
 // not evidence: BUYs come in volatile phases, where -x% also comes more often.)
@@ -34,6 +35,8 @@ rangeBars = input.int(20, "Bougies plates = fin du mouvement", minval = 1, maxva
 entryBars = input.int(0, "Fenetre d'achat : bougies max apres le BUY (0 = pas de limite)", minval = 0, maxval = 500, group = G_ACT, tooltip = "Par defaut, seule la distance au prix du BUY ferme la fenetre : acheter au prix du BUY reste le meme trade, meme 10 bougies plus tard.")
 lateMaxPct = input.float(1.5, "Trop tard si deja a +x % du BUY", minval = 0.1, step = 0.25, group = G_ACT, tooltip = "Si le prix est deja monte de plus de x % depuis le BUY, la fenetre se ferme.")
 showWindow = input.bool(true, "Fond vert = fenetre d'achat", group = G_ACT)
+useRegime = input.bool(true, "Tendance de fond : pas d'ACHAT si le jour cloture sous sa moyenne", group = G_ACT, tooltip = "Teste 2024-2026 sur BTC, ETH, ZEC, HYPE : etre investi seulement quand la cloture journaliere est au-dessus de sa moyenne 50 jours a reduit la pire chute (BTC -53 % -> -27 %, ETH -68 % -> -38 %). Le Range Filter seul ne la reduisait pas.")
+regimeLen = input.int(50, "Tendance de fond : moyenne journaliere (jours)", minval = 5, maxval = 400, group = G_ACT)
 showLevels = input.bool(true, "Niveaux de cloture : BUY si > / FIN si <", group = G_ACT, tooltip = "Le BUY (ou la FIN) est confirme si la bougie cloture au-dela de ce niveau. C'est le calcul exact du filtre.")
 alertPreview = input.bool(false, "Alerte aussi quand un BUY se forme (avant la cloture)", group = G_ACT, tooltip = "Previent plus tot, mais le BUY peut disparaitre si le prix redescend avant la cloture.")
 
@@ -282,7 +285,12 @@ bool previewBuy = live and ready and not inMove and close > buyLevel
 bool previewFin = live and ready and inMove and (close < finLevel or (flatBars + 1 >= rangeBars and close <= buyLevel))
 int sinceBuy = inMove ? bar_index - buyBar : na
 float fromBuy = inMove ? close / refPrice - 1.0 : na
-bool buyWindow = inMove and fromBuy <= lateMaxPct / 100.0 and (entryBars == 0 or sinceBuy <= entryBars)
+// Daily trend switch: previous completed daily close vs its SMA (no repaint: [1] with lookahead_on).
+[dClose, dSma] = request.security(syminfo.tickerid, "D", [close[1], ta.sma(close, regimeLen)[1]], lookahead = barmerge.lookahead_on)
+bool regimeUp = na(dSma) or dClose > dSma
+bool blocked = useRegime and not regimeUp
+bool buyWindowRaw = inMove and fromBuy <= lateMaxPct / 100.0 and (entryBars == 0 or sinceBuy <= entryBars)
+bool buyWindow = buyWindowRaw and not blocked
 
 const int ST_INIT = 0
 const int ST_BUY = 1
@@ -291,15 +299,16 @@ const int ST_IN = 3
 const int ST_FIN_FORMING = 4
 const int ST_DOWN = 5
 const int ST_WAIT = 6
-int state = not ready ? ST_INIT : previewFin ? ST_FIN_FORMING : buyWindow ? ST_BUY : inMove ? ST_IN : previewBuy ? ST_BUY_FORMING : filterDirection == -1 ? ST_DOWN : ST_WAIT
-string stateWord = state == ST_INIT ? "INITIALISATION" : state == ST_BUY ? "ACHAT" : state == ST_BUY_FORMING ? "ACHAT ?" : state == ST_IN ? "EN COURS " + pct(fromBuy, "0.0") : state == ST_FIN_FORMING ? "FIN ?" : state == ST_DOWN ? "PAS D'ACHAT" : "ATTENTE"
-color stateBg = state == ST_BUY ? colUp : state == ST_BUY_FORMING or state == ST_FIN_FORMING ? colAmber : state == ST_IN ? color.new(colUp, 65) : state == ST_DOWN ? colDown : colNeutral
+const int ST_REGIME = 7
+int state = not ready ? ST_INIT : previewFin ? ST_FIN_FORMING : blocked and (buyWindowRaw or not inMove) ? ST_REGIME : buyWindow ? ST_BUY : inMove ? ST_IN : previewBuy ? ST_BUY_FORMING : filterDirection == -1 ? ST_DOWN : ST_WAIT
+string stateWord = state == ST_INIT ? "INITIALISATION" : state == ST_BUY ? "ACHAT" : state == ST_BUY_FORMING ? "ACHAT ?" : state == ST_IN ? "EN COURS " + pct(fromBuy, "0.0") : state == ST_FIN_FORMING ? "FIN ?" : state == ST_DOWN ? "PAS D'ACHAT" : state == ST_REGIME ? "FOND BAISSIER" : "ATTENTE"
+color stateBg = state == ST_BUY ? colUp : state == ST_BUY_FORMING or state == ST_FIN_FORMING ? colAmber : state == ST_IN ? color.new(colUp, 65) : state == ST_DOWN or state == ST_REGIME ? colDown : colNeutral
 color stateTxt = state == ST_BUY or state == ST_BUY_FORMING or state == ST_FIN_FORMING ? color.black : color.white
 lvl(float x) =>
     str.tostring(x, format.mintick) + " (" + pct(x / close - 1.0, "0.0") + ")"
-string stateLine = state == ST_INIT ? "historique trop court" : state == ST_BUY ? "BUY " + str.tostring(refPrice, format.mintick) + (sinceBuy == 0 ? ", a cette cloture" : ", il y a " + str.tostring(sinceBuy) + " b.") + "  |  prix " + pct(fromBuy, "0.0") : state == ST_BUY_FORMING ? "pas confirme : BUY si cloture > " + lvl(buyLevel) : state == ST_IN ? (fromBuy > lateMaxPct / 100.0 ? "deja " + pct(fromBuy, "0.0") + " depuis le BUY : trop tard" : "fenetre fermee (" + str.tostring(entryBars) + " b.)") + "  |  FIN si cloture < " + lvl(finLevel) : state == ST_FIN_FORMING ? (close < finLevel ? "FIN si cloture < " + lvl(finLevel) : "plat trop long : FIN si pas > " + lvl(buyLevel)) : "BUY si cloture > " + lvl(buyLevel)
+string stateLine = state == ST_INIT ? "historique trop court" : state == ST_REGIME ? "jour " + str.tostring(dClose, format.mintick) + " < moyenne " + str.tostring(regimeLen) + " j " + str.tostring(dSma, format.mintick) + " : pas d'achat spot" : state == ST_BUY ? "BUY " + str.tostring(refPrice, format.mintick) + (sinceBuy == 0 ? ", a cette cloture" : ", il y a " + str.tostring(sinceBuy) + " b.") + "  |  prix " + pct(fromBuy, "0.0") : state == ST_BUY_FORMING ? "pas confirme : BUY si cloture > " + lvl(buyLevel) : state == ST_IN ? (fromBuy > lateMaxPct / 100.0 ? "deja " + pct(fromBuy, "0.0") + " depuis le BUY : trop tard" : "fenetre fermee (" + str.tostring(entryBars) + " b.)") + "  |  FIN si cloture < " + lvl(finLevel) : state == ST_FIN_FORMING ? (close < finLevel ? "FIN si cloture < " + lvl(finLevel) : "plat trop long : FIN si pas > " + lvl(buyLevel)) : "BUY si cloture > " + lvl(buyLevel)
 
-bgcolor(showWindow and buyWindow ? color.new(colUp, 84) : showWindow and previewBuy ? color.new(colAmber, 80) : na, title = "Fenetre d'achat")
+bgcolor(showWindow and buyWindow ? color.new(colUp, 84) : showWindow and previewBuy and not blocked ? color.new(colAmber, 80) : na, title = "Fenetre d'achat")
 
 // Tag and levels live on the last bar only: deleted and redrawn on each update.
 // The level value is written in the tag, so the dashed lines carry no label (no overlap).
@@ -321,14 +330,14 @@ if barstate.islast
 // === ALERTS ===
 // Create one alert with "Any alert() function call". Signals at bar close, not orders.
 if buySignal
-    alert(syminfo.ticker + " " + timeframe.period + " : BUY a " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
-if alertPreview and previewBuy
+    alert(syminfo.ticker + " " + timeframe.period + " : BUY a " + str.tostring(close, format.mintick) + (blocked ? " (fond baissier : pas d'achat spot)" : ""), alert.freq_once_per_bar_close)
+if alertPreview and previewBuy and not blocked
     alert(syminfo.ticker + " " + timeframe.period + " : BUY en formation, confirme si cloture > " + str.tostring(buyLevel, format.mintick), alert.freq_once_per_bar)
 if endSignal
     alert(syminfo.ticker + " " + timeframe.period + " : FIN du mouvement (" + endReason + "), " + pct(moveRes, "0.00") + " depuis le BUY", alert.freq_once_per_bar_close)
 
 // === PANELS ===
-var table liveTable = table.new(position.top_right, 2, 6, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
+var table liveTable = table.new(position.top_right, 2, 7, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
 var table statsTable = table.new(position.bottom_right, 3, 13, bgcolor = panelBg, frame_color = panelLine, frame_width = 1, border_color = panelLine, border_width = 1)
 
 cell(table t, int c, int r, string s, color col, color bg = na) =>
@@ -373,6 +382,8 @@ if barstate.islast and showLive
         float amount = walletIn * sizePct / 100.0
         cell(liveTable, 0, 4, "Montant (" + str.tostring(sizePct, "0.#") + " %)", fgMuted)
         cell(liveTable, 1, 4, str.tostring(amount, "#,##0.00") + " " + syminfo.currency + "  =  " + str.tostring(amount / close, "#,##0.####") + " " + syminfo.basecurrency, fg)
+    cell(liveTable, 0, 6, "Fond : jour vs moyenne " + str.tostring(regimeLen) + " j", fgMuted)
+    cell(liveTable, 1, 6, na(dSma) ? "n/a" : (regimeUp ? "▲ au-dessus " : "▼ en dessous ") + pct(dClose / dSma - 1.0, "0.0"), na(dSma) ? fgMuted : regimeUp ? colUp : colDown)
     // Honesty line: does a BUY here beat buying at any bar? (detail in the stats panel)
     int nB = cN.get(2)
     float zB = zOf(1)
