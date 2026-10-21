@@ -20,7 +20,7 @@
   .toggle.on { color:var(--violet); border-color:var(--violet); }
   .spacer { flex:1; }
   .src { color:var(--muted); font-size:12px; }
-  main { display:grid; grid-template-columns:270px 1fr 320px; min-height:0; }
+  main { display:grid; grid-template-columns:270px 1fr 340px; min-height:0; }
   aside, section.panel { background:var(--panel); min-height:0; overflow:auto; }
   aside { border-right:1px solid var(--line); }
   section.panel { border-left:1px solid var(--line); padding:16px; display:flex; flex-direction:column; gap:14px; }
@@ -41,11 +41,11 @@
   #legend { position:absolute; left:12px; top:10px; z-index:3; font-size:13px; color:var(--muted); pointer-events:none; }
   #legend b { color:var(--fg); font-size:16px; margin-right:8px; }
   .state { border-radius:10px; padding:16px; text-align:center; }
-  .state .w { font-size:28px; font-weight:800; letter-spacing:.02em; }
+  .state .w { font-size:24px; font-weight:800; letter-spacing:.02em; white-space:nowrap; }
   .state .d { margin-top:6px; font-size:13px; opacity:.9; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:6px 12px; font-size:13px; }
   .kv .k { color:var(--muted); }
-  .kv .v { text-align:right; font-variant-numeric:tabular-nums; }
+  .kv .v { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
   h3 { margin:0; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:600; }
   .card { border:1px solid var(--line); border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px; }
   .inputs { display:flex; gap:8px; }
@@ -139,8 +139,11 @@ function drawChart(d, reset) {
   if (d.in_move) { pl(d.fin_level, C.down, 'FIN si cloture <'); pl(d.ref, C.muted, 'prix du BUY', 1); }
   else pl(d.buy_level, C.up, 'BUY si cloture >');
   if (d.range) {
-    top_.setData([{ time: d.range.t0 + TZ, value: d.range.top }, { time: d.range.t1 + TZ, value: d.range.top }]);
-    bot_.setData([{ time: d.range.t0 + TZ, value: d.range.bot }, { time: d.range.t1 + TZ, value: d.range.bot }]);
+    // One point per future bar: the time scale spaces points by index, not by time.
+    const step = (d.range.t1 - d.range.t0) / (d.range.hz - 1);
+    const ts = Array.from({ length: d.range.hz }, (_, i) => d.range.t0 + i * step + TZ);
+    top_.setData(ts.map(time => ({ time, value: d.range.top })));
+    bot_.setData(ts.map(time => ({ time, value: d.range.bot })));
   } else { top_.setData([]); bot_.setData([]); }
   if (reset) chart.timeScale().setVisibleLogicalRange({ from: d.candles.length - 160, to: d.candles.length + 28 });
   $('legend').innerHTML = `<b>${d.sym}</b>${S.tf} &middot; ${fmt(d.price)}`;
@@ -152,7 +155,7 @@ function drawPanel(d) {
   $('state').style.background = bg; $('state').style.color = fg;
   $('state').innerHTML = `<div class="w">${d.word}</div><div class="d">${d.detail}</div>`;
   const reg = d.regime.up == null ? '<span style="color:var(--muted)">n/a</span>'
-    : `<span style="color:${d.regime.up ? C.up : C.down}">${d.regime.up ? '▲ haussier' : '▼ baissier'} (${pct(d.regime.close / d.regime.sma - 1)} vs moy. 50 j)</span>`;
+    : `<span style="color:${d.regime.up ? C.up : C.down}">${d.regime.up ? '▲' : '▼'} ${pct(d.regime.close / d.regime.sma - 1)} vs moy. 50 j</span>`;
   const rows = [['Cloture de la bougie', `<span id="cd"></span>`], ['Fond (journalier)', reg],
     ['Filtre', `<span style="color:${dirColor(d.fdir)}">${d.fdir === 1 ? '▲ hausse' : d.fdir === -1 ? '▼ baisse' : '■ plat'}</span>`]];
   if (d.in_move) rows.push(['Depuis BUY : actuel', `<span style="color:${d.price >= d.ref ? C.up : C.down}">${pct(d.price / d.ref - 1)}</span>`],
