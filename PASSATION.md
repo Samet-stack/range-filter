@@ -14,9 +14,13 @@
   - **ne jamais pousser sur GitLab sans sa validation**.
 
 ## État du dépôt `~/range-filter` (branche `main`)
+- **GitHub devient la destination principale à la demande de Samet le 21 octobre 2026** : [Samet-stack/range-filter](https://github.com/Samet-stack/range-filter), dépôt **public**, créé et poussé avec l'historique complet. Accès anonyme vérifié via l'API GitHub (`private=false`, `visibility=public`).
+  - Remote `github` ; `main` suit `github/main`. Les prochains pushes autorisés vers GitHub se font avec `git push github main`.
+  - GitHub CLI local (`gh` 2.92.0) authentifié en `Samet-stack`. Le connecteur GitHub de la conversation peut être lié à un autre compte : vérifier l'identité avant toute écriture.
+  - Remote `origin` conservé pour GitLab ; aucun dépôt distant supprimé. La demande de publication publique se poursuit désormais sur GitHub, sans attendre de changement de visibilité GitLab.
 - **Publication autorisée explicitement par Samet le 21 octobre 2026**, y compris le passage en public. Les 18 commits précédemment locaux et le commit `f27b0ce` (terminal, V2, collecte et tests) ont été poussés sur `origin/main`, dépôt [samet.reyhan/range-filter](https://gitlab.com/samet.reyhan/range-filter).
   - Accès Git vérifié via le gestionnaire d'identifiants de **Git Windows**, sans enregistrer de secret dans le dépôt ni modifier la configuration globale. Commande : `git -c "credential.helper=!'/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe'" push origin main`.
-  - **Passage en public encore bloqué** : l'accès existant permet le push, mais l'API de modification du projet répond `403 insufficient_scope`. Samet peut changer `Settings > General > Visibility, project features, permissions > Project visibility > Public`, puis enregistrer. Ne pas déclarer le dépôt public avant une vérification sans authentification.
+  - Tentative de passage en public GitLab refusée : l'accès existant permet le push, mais l'API de modification du projet répond `403 insufficient_scope`. Ce blocage a précédé le choix de publier sur GitHub.
   - Avant publication : 28 tests réussis, diff relu, recherche de secrets sans résultat dans les 55 versions de fichiers de l'historique et les 44 fichiers de travail. Les données, poids, caches et journaux restent ignorés et locaux.
   - Un jeton d'accès (PAT) collé dans un ancien chat **doit être révoqué** par Samet. Il n'est stocké nulle part.
 - Commits signés `samet.reyhan <samet.reyhan@functori.com>` via `git -c user.name=... -c user.email=...`. Ne pas modifier la configuration git globale.
@@ -83,4 +87,4 @@ Méthode commune à tous les tests :
   - alertes Telegram du terminal : Samet crée le bot avec @BotFather, le jeton reste dans un fichier local, jamais dans le chat ;
   - déploiement sur un petit serveur loué (VPS), protégé par mot de passe ;
   - journal de trades : c'est la gestion de Samet qui fait ses résultats, et il faut la mesurer.
-- Push GitLab réalisé sur demande de Samet ; reste à vérifier le passage en public après modification de la visibilité (voir l'état Git ci-dessus).
+- Publication publique GitHub réalisée et vérifiée ; GitLab conservé comme dépôt secondaire (voir l'état Git ci-dessus).
