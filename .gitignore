@@ -3,3 +3,5 @@ backtest/data1h/
 __pycache__/
 backtest/kronos_cache/
 kronos-*.pine
+backtest/kronos_cache_ft/
+backtest/kronos_range*.csv

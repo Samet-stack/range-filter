@@ -4,7 +4,8 @@ with a blend of both. Reads kronos_range.csv from kronos_range_test.py.
 Usage: ~/kronos/.venv/bin/python -I kronos_fix_test.py"""
 import numpy as np, pandas as pd
 from pathlib import Path
-R = pd.read_csv(Path(__file__).parent / "kronos_range.csv")
+import sys
+R = pd.read_csv(Path(__file__).parent / (sys.argv[1] if len(sys.argv) > 1 else "kronos_range.csv"))
 R["half"] = R.groupby(["tf", "sym"]).cumcount() / R.groupby(["tf", "sym"]).sym.transform("size") >= 0.5
 def pin(y, q, tau):
     d = y - q; return np.mean(np.maximum(tau * d, (tau - 1) * d))

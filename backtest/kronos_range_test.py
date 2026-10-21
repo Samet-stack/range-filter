@@ -6,7 +6,7 @@ current volatility (std of the last 48 one-bar log returns), 90th / 10th pct, pa
 Scores: how often reality breaks above top / below bottom (ideal 10 % each), pinball loss
 (lower = better), and rank correlation of predicted width vs realised width.
 Usage: ~/kronos/.venv/bin/python -I kronos_range_test.py"""
-import math, sys, time
+import math, os, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent)); sys.path.insert(0, str(Path.home() / "kronos"))
 import numpy as np, pandas as pd, torch
@@ -17,9 +17,12 @@ T2026 = 1767225600000
 CTX, H, PATHS, BATCH = 400, 12, 16, 128
 PLAN = (("4h", "data", 20), ("1h", "data1h", 40))  # (timeframe, folder, STEP)
 HERE = Path(__file__).parent
+# KRONOS_MODEL=~/kronos/finetuned/crypto/best to test the fine-tuned model (separate result files).
+MODEL = os.environ.get("KRONOS_MODEL", "NeoQuasar/Kronos-small")
+SUF = "" if MODEL == "NeoQuasar/Kronos-small" else "_ft"
 
 torch.manual_seed(0); np.random.seed(0)
-pred = KronosPredictor(Kronos.from_pretrained("NeoQuasar/Kronos-small"),
+pred = KronosPredictor(Kronos.from_pretrained(MODEL),
                        KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base"),
                        device="cuda:0" if torch.cuda.is_available() else "cpu", max_context=512)
 
@@ -64,7 +67,7 @@ for tf, sub, step in PLAN:
                                  r_top=h[i + 1:i + H + 1].max() / c[i] - 1, r_bot=l[i + 1:i + H + 1].min() / c[i] - 1))
         print(f"{tf} {sym}: {len(starts)} departs, {time.time() - t0:.0f}s", flush=True)
 
-R = pd.DataFrame(rows); R.to_csv(HERE / "kronos_range.csv", index=False)
+R = pd.DataFrame(rows); R.to_csv(HERE / f"kronos_range{SUF}.csv", index=False)
 
 def pinball(y, q, tau):
     d = y - q

@@ -4,7 +4,7 @@ cannot have seen it. Results cached per asset in kronos_cache/ (rerun resumes). 
 Kronos-small forecasts the next H bars from the last 400 closed bars (OHLC, no volume).
 Outcome = the Pine test: +x% before -x% from the start close (same bar touching both = down).
 Usage: ~/kronos/.venv/bin/python -I kronos_test.py [4h,1h]   (reads data/ and data1h/)"""
-import math, sys, time
+import math, os, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent)); sys.path.insert(0, str(Path.home() / "kronos"))
 import numpy as np, pandas as pd, torch
@@ -16,6 +16,9 @@ T2026 = 1767225600000
 CTX, H, EVERY, CAP, BATCH, SAMPLES = 400, 12, 5, 300, 32, 5
 TFS = sys.argv[1].split(",") if len(sys.argv) > 1 else ["4h", "1h"]
 HERE = Path(__file__).parent
+# KRONOS_MODEL=~/kronos/finetuned/crypto/best to test the fine-tuned model (separate result files).
+MODEL = os.environ.get("KRONOS_MODEL", "NeoQuasar/Kronos-small")
+SUF = "" if MODEL == "NeoQuasar/Kronos-small" else "_ft"
 
 def first_hit(h, l, c, i, x):
     up, dn = c[i] * (1 + x), c[i] * (1 - x)
@@ -32,7 +35,7 @@ def z2(a, b):  # two-proportion z, a/b = lists of 0/1
 
 torch.manual_seed(0); np.random.seed(0)
 tok = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
-mdl = Kronos.from_pretrained("NeoQuasar/Kronos-small")
+mdl = Kronos.from_pretrained(MODEL)
 pred = KronosPredictor(mdl, tok, device="cuda:0" if torch.cuda.is_available() else "cpu", max_context=512)
 
 rows = []
@@ -51,7 +54,7 @@ for tf, sub in [(x, {"4h": "data", "1h": "data1h"}[x]) for x in TFS]:
         starts = [i for i in starts if i >= CTX - 1 and i + H < len(t)]
         df = pd.DataFrame({"open": o, "high": h, "low": l, "close": c})
         ts = pd.Series(pd.to_datetime(t, unit="ms"))
-        cache = HERE / "kronos_cache" / f"{tf}_{sym}.csv"
+        cache = HERE / f"kronos_cache{SUF}" / f"{tf}_{sym}.csv"
         if cache.exists():
             rows += pd.read_csv(cache).to_dict("records"); print(tf, sym, "cache", flush=True); continue
         mine = []; t0 = time.time()
